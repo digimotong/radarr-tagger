@@ -5,15 +5,15 @@ Automatically updates movie tags in Radarr based on custom format scores, releas
 ## Features
 
 - **Score-based tagging**:
-  - `negative_score` (red) when customFormatScore < 0
-  - `positive_score` (green) when customFormatScore > threshold (default: 100)
-  - `no_score` (gray) when score is None or between 0-threshold
+  - `negative_score` when customFormatScore < 0
+  - `positive_score` when customFormatScore > threshold (default: 100)
+  - `no_score` when score is None or between 0-threshold
 
 - **Quality tagging**:
-  - `4k` (blue) when resolution is 2160p (configurable via TAG_4K env var)
+  - `4k` when resolution is 2160p (configurable via TAG_4K env var)
 
 - **Release group tagging**:
-  - `motong` (purple) when release group is "motong" (configurable via TAG_MOTONG env var)
+  - `motong` when release group is "motong" (configurable via TAG_MOTONG env var)
 
 ## Containerized Deployment
 
@@ -58,13 +58,13 @@ services:
 
 The application automatically creates and manages these tags:
 
-| Tag Name | Color | Trigger Condition |
-|----------|-------|-------------------|
-| negative_score | #ff0000 | customFormatScore < 0 |
-| positive_score | #00ff00 | customFormatScore > threshold |
-| no_score | #808080 | No score or 0 ≤ score ≤ threshold |
-| 4k | #0000ff | Resolution is 2160p (requires TAG_4K=true) |
-| motong | #800080 | Release group contains "motong" (requires TAG_MOTONG=true) |
+| Tag Name | Trigger Condition |
+|----------|-------------------|
+| negative_score | customFormatScore < 0 |
+| positive_score | customFormatScore > threshold |
+| no_score | No score or 0 ≤ score ≤ threshold |
+| 4k | Resolution is 2160p (requires TAG_4K=true) |
+| motong | Release group contains "motong" (requires TAG_MOTONG=true) |
 
 Tags are created automatically if they don't exist in Radarr.
 

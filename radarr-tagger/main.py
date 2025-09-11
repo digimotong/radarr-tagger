@@ -47,13 +47,12 @@ class RadarrAPI:
             logging.error("Failed to fetch tags: %s", str(e))
             raise
 
-    def create_tag(self, label: str, color: str = "#808080") -> Dict:
+    def create_tag(self, label: str) -> Dict:
         """Create a new tag in Radarr"""
         endpoint = f"{self.base_url}/api/v3/tag"
         try:
             response = self.session.post(endpoint, json={
-                'label': label,
-                'color': color
+                'label': label
             })
             response.raise_for_status()
             return response.json()
@@ -143,13 +142,7 @@ def process_movie_tags(
     current_tags = set(movie.get('tags', []))
 
     # Remove any existing score tags (by ID)
-    score_tags = {
-        'negative_score': '#ff0000',
-        'positive_score': '#00ff00',
-        'no_score': '#808080',
-        'motong': '#800080',
-        '4k': '#0000ff'
-    }
+    score_tags = ['negative_score', 'positive_score', 'no_score', 'motong', '4k']
     new_tag_ids = [tag_id for tag_id in current_tags
                  if not any(tag['id'] == tag_id and tag['label'] in score_tags
                           for tag in api.get_tags())]
@@ -210,18 +203,12 @@ def ensure_required_tags(api: RadarrAPI) -> Dict:
     all_tags = api.get_tags()
     tag_map = {tag['label']: tag['id'] for tag in all_tags}
 
-    score_tags = {
-        'negative_score': '#ff0000',
-        'positive_score': '#00ff00',
-        'no_score': '#808080',
-        'motong': '#800080',
-        '4k': '#0000ff'
-    }
+    required_tags = ['negative_score', 'positive_score', 'no_score', 'motong', '4k']
 
-    for tag, color in score_tags.items():
+    for tag in required_tags:
         if tag not in tag_map:
             logging.info("Creating missing tag: %s", tag)
-            new_tag = api.create_tag(tag, color)
+            new_tag = api.create_tag(tag)
             tag_map[tag] = new_tag['id']
 
     return tag_map
