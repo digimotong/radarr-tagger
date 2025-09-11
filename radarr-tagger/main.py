@@ -130,7 +130,7 @@ def get_score_tag(score: int, threshold: int) -> str:
         return "positive_score"
     return "no_score"
 
-VERSION = "1.0.0"
+VERSION = "1.0.2"
 
 def process_movie_tags(
         api: RadarrAPI,
