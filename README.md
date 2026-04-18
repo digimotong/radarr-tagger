@@ -5,9 +5,9 @@ Automatically updates movie tags in Radarr based on custom format scores, releas
 ## Features
 
 - **Score-based tagging**:
-  - `negative_score` when customFormatScore < 0
-  - `positive_score` when customFormatScore > threshold (default: 100)
-  - `no_score` when score is None or between 0-threshold
+  - `negative-score` when customFormatScore < 0
+  - `positive-score` when customFormatScore > threshold (default: 100)
+  - `no-score` when score is None or between 0-threshold
 
 - **Quality tagging**:
   - `4k` when resolution is 2160p (configurable via TAG_4K env var)
@@ -31,7 +31,7 @@ services:
       RADARR_URL: http://radarr:7878  # Radarr instance URL
       RADARR_API_KEY: your-api-key    # Radarr API key (required)
       LOG_LEVEL: INFO                 # DEBUG, INFO, WARNING, ERROR
-      SCORE_THRESHOLD: 100            # Threshold for positive_score
+      SCORE_THRESHOLD: 100            # Threshold for positive-score
       INTERVAL_MINUTES: 20            # Minutes between runs
       # TAG_4K: true                  # Enable 4k tagging
       # TAG_MOTONG: true              # Enable motong tagging
@@ -49,7 +49,7 @@ services:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LOG_LEVEL` | `INFO` | Logging verbosity (DEBUG, INFO, WARNING, ERROR) |
-| `SCORE_THRESHOLD` | `100` | Score threshold for positive_score tag |
+| `SCORE_THRESHOLD` | `100` | Score threshold for positive-score tag |
 | `INTERVAL_MINUTES` | `20` | Minutes between automatic runs |
 | `TAG_4K` | `false` | Enable 4k resolution tagging |
 | `TAG_MOTONG` | `false` | Enable motong release group tagging |
@@ -60,9 +60,9 @@ The application automatically creates and manages these tags:
 
 | Tag Name | Trigger Condition |
 |----------|-------------------|
-| negative_score | customFormatScore < 0 |
-| positive_score | customFormatScore > threshold |
-| no_score | No score or 0 ≤ score ≤ threshold |
+| negative-score | customFormatScore < 0 |
+| positive-score | customFormatScore > threshold |
+| no-score | No score or 0 ≤ score ≤ threshold |
 | 4k | Resolution is 2160p (requires TAG_4K=true) |
 | motong | Release group contains "motong" (requires TAG_MOTONG=true) |
 
@@ -80,7 +80,7 @@ Example log output:
 ```
 2025-04-27 12:00:00 - INFO - Starting Radarr Tag Updater v1.0.0
 2025-04-27 12:00:02 - INFO - Processing 125 movies
-2025-04-27 12:00:05 - DEBUG - Movie: Inception - Score: 150 - Tag: positive_score
+2025-04-27 12:00:05 - DEBUG - Movie: Inception - Score: 150 - Tag: positive-score
 2025-04-27 12:00:05 - DEBUG - Added 4k tag for Inception
 2025-04-27 12:00:10 - INFO - Processing complete. Updated 18/125 movies
 2025-04-27 12:00:10 - INFO - Next run in 20 minutes
