@@ -122,12 +122,12 @@ def get_config_from_env():
 def get_score_tag(score: int, threshold: int) -> str:
     """Determine the appropriate score tag based on customFormatScore"""
     if score is None:
-        return "no_score"
+        return "no-score"
     if score < 0:
-        return "negative_score"
+        return "negative-score"
     if score > threshold:
-        return "positive_score"
-    return "no_score"
+        return "positive-score"
+    return "no-score"
 
 VERSION = "1.0.3"
 
@@ -142,7 +142,7 @@ def process_movie_tags(
     current_tags = set(movie.get('tags', []))
 
     # Remove any existing score tags (by ID)
-    score_tags = ['negative_score', 'positive_score', 'no_score', 'motong', '4k']
+    score_tags = ['negative-score', 'positive-score', 'no-score', 'motong', '4k']
     new_tag_ids = [tag_id for tag_id in current_tags
                  if not any(tag['id'] == tag_id and tag['label'] in score_tags
                           for tag in api.get_tags())]
@@ -203,7 +203,7 @@ def ensure_required_tags(api: RadarrAPI) -> Dict:
     all_tags = api.get_tags()
     tag_map = {tag['label']: tag['id'] for tag in all_tags}
 
-    required_tags = ['negative_score', 'positive_score', 'no_score', 'motong', '4k']
+    required_tags = ['negative-score', 'positive-score', 'no-score', 'motong', '4k']
 
     for tag in required_tags:
         if tag not in tag_map:
