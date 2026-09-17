@@ -13,17 +13,26 @@ from typing import Dict, List
 import requests
 from requests.exceptions import RequestException
 
+# Single source of truth for the tags this tool manages (creates and assigns).
+# Any tag in this list is stripped from every movie before the current desired
+# state is applied, and created on demand when missing from Radarr.
+# NOTE: 'motong' and '4k' are only re-applied when TAG_MOTONG / TAG_4K are
+# enabled, so disabling either flag also removes that tag from all movies.
+MANAGED_TAGS = ['negative-score', 'positive-score', 'no-score', 'motong', '4k']
+
 class RadarrAPI:
     """Client for Radarr API interactions"""
 
-    def __init__(self, base_url: str, api_key: str):
+    def __init__(self, base_url: str, api_key: str,
+                 session: requests.Session = None):
         self.base_url = base_url.rstrip('/')
         self.api_key = api_key
-        self.session = requests.Session()
-        self.session.headers.update({
-            'X-Api-Key': self.api_key,
-            'Accept': 'application/json'
-        })
+        self.session = session if session is not None else requests.Session()
+        if hasattr(self.session, 'headers'):
+            self.session.headers.update({
+                'X-Api-Key': self.api_key,
+                'Accept': 'application/json'
+            })
 
     def get_movies(self) -> List[Dict]:
         """Fetch all movies from Radarr"""
@@ -141,14 +150,15 @@ def process_movie_tags(
     movie_update = movie.copy()
     current_tags = set(movie.get('tags', []))
 
-    # Remove any existing score tags (by ID)
-    score_tags = ['negative-score', 'positive-score', 'no-score', 'motong', '4k']
+    # Remove any existing managed tags (by ID). The label->id mapping is already
+    # available in ``tag_map``, so no additional get_tags() request is needed.
+    managed_tag_ids = set(tag_map.values())
     new_tag_ids = [tag_id for tag_id in current_tags
-                 if not any(tag['id'] == tag_id and tag['label'] in score_tags
-                          for tag in api.get_tags())]
+                   if tag_id not in managed_tag_ids]
 
     # Get movie file and score
     score = None
+    movie_file = None
     if movie.get('movieFileId'):
         try:
             movie_file = api.get_movie_file(movie['movieFileId'])
@@ -164,8 +174,9 @@ def process_movie_tags(
         new_tag_name)
     new_tag_ids.append(tag_map[new_tag_name])
 
-    # Add special tags if needed
-    new_tag_ids = add_special_tags(api, movie, tag_map, new_tag_ids, config)
+    # Add special tags if needed (reusing the movie file already fetched above)
+    new_tag_ids = add_special_tags(
+        movie, movie_file, tag_map, new_tag_ids, config)
 
     # Only update if tags changed
     if set(new_tag_ids) != current_tags:
@@ -174,27 +185,29 @@ def process_movie_tags(
     return False
 
 def add_special_tags(
-        api: RadarrAPI,
         movie: Dict,
+        movie_file: Dict,
         tag_map: Dict,
         tag_ids: List[int],
         config: Dict) -> List[int]:
-    """Add special tags (motong, 4k) if conditions are met"""
-    if not movie.get('movieFileId'):
+    """Add special tags (motong, 4k) if conditions are met.
+
+    ``movie_file`` is the already-fetched movie file payload (or None when the
+    movie has no file / the lookup failed), avoiding a duplicate API request.
+    """
+    if not movie.get('movieFileId') or movie_file is None:
         return tag_ids
 
-    try:
-        movie_file = api.get_movie_file(movie['movieFileId'])
-        if config['tag_motong_enabled'] and movie_file.get('releaseGroup', '').lower() == 'motong':
-            tag_ids.append(tag_map['motong'])
-            logging.debug("Added motong tag for %s", movie['title'])
+    if config['tag_motong_enabled'] and \
+            movie_file.get('releaseGroup', '').lower() == 'motong':
+        tag_ids.append(tag_map['motong'])
+        logging.debug("Added motong tag for %s", movie['title'])
 
-        quality = movie_file.get('quality', {})
-        if config['tag_4k_enabled'] and quality.get('quality', {}).get('resolution') == 2160:
-            tag_ids.append(tag_map['4k'])
-            logging.debug("Added 4k tag for %s", movie['title'])
-    except RequestException:
-        pass
+    quality = movie_file.get('quality', {})
+    if config['tag_4k_enabled'] and \
+            quality.get('quality', {}).get('resolution') == 2160:
+        tag_ids.append(tag_map['4k'])
+        logging.debug("Added 4k tag for %s", movie['title'])
 
     return tag_ids
 
@@ -203,15 +216,38 @@ def ensure_required_tags(api: RadarrAPI) -> Dict:
     all_tags = api.get_tags()
     tag_map = {tag['label']: tag['id'] for tag in all_tags}
 
-    required_tags = ['negative-score', 'positive-score', 'no-score', 'motong', '4k']
-
-    for tag in required_tags:
+    for tag in MANAGED_TAGS:
         if tag not in tag_map:
             logging.info("Creating missing tag: %s", tag)
             new_tag = api.create_tag(tag)
             tag_map[tag] = new_tag['id']
 
     return tag_map
+
+def run_once(api: RadarrAPI, config: Dict, test_mode: bool = False) -> int:
+    """Execute a single tagging pass and return the number of updated movies.
+
+    Kept separate from ``main`` so the processing logic can be exercised
+    without entering the infinite polling loop.
+    """
+    tag_map = ensure_required_tags(api)
+    movies = api.get_movies()
+
+    if test_mode:
+        movies = movies[:5]
+        logging.info("TEST MODE: Processing first 5 movies only")
+
+    updated_count = 0
+    for movie in movies:
+        if process_movie_tags(
+                api, movie, tag_map, config['score_threshold'], config):
+            updated_count += 1
+
+    logging.info(
+        "Processing complete. Updated %s/%s movies",
+        updated_count,
+        len(movies))
+    return updated_count
 
 def main():
     """Main execution flow"""
@@ -230,19 +266,7 @@ def main():
 
     while True:
         try:
-            tag_map = ensure_required_tags(api)
-            movies = api.get_movies()
-
-            if args.test:
-                movies = movies[:5]
-                logging.info("TEST MODE: Processing first 5 movies only")
-
-            updated_count = sum(
-                1 for movie in movies
-                if process_movie_tags(api, movie, tag_map, config['score_threshold'], config)
-            )
-
-            logging.info("Processing complete. Updated %s/%s movies", updated_count, len(movies))
+            run_once(api, config, test_mode=args.test)
             logging.info("Next run in %s minutes", interval_minutes)
             time.sleep(interval_minutes * 60)
 

@@ -13,5 +13,11 @@
 !radarr-tagger
 !radarr-tagger/*
 !requirements.txt
+!requirements-dev.txt
 !Dockerfile
 !.pylintrc
+
+!conftest.py
+!pytest.ini
+!tests
+!tests/*

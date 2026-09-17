@@ -25,9 +25,23 @@ jobs:
       - name: Run pylint
         run: pylint radarr-tagger
 
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.12
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Run pytest
+        run: python -m pytest -v
+
   build-and-push:
     runs-on: ubuntu-latest
-    needs: lint
+    needs: [lint, test]
     permissions:
       contents: read
       packages: write
