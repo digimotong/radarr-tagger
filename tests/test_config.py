@@ -269,10 +269,11 @@ class TestSetupLogging:
         assert len(logging.getLogger().handlers) == 1
 
     def test_unknown_level_raises(self):
-        """setup_logging is not the guard; the config layer is.
+        """logging.basicConfig is the only validator in setup_logging.
 
-        Pinned so a future refactor cannot quietly move validation here instead
-        of failing fast before the loop starts.
+        main() never reaches this: get_config_from_env() calls get_log_level()
+        first, so the level is already valid by the time setup_logging runs. This
+        test pins the raw behaviour of the function in isolation, not a guard.
         """
         with pytest.raises(ValueError):
             main.setup_logging('LOUD')
@@ -434,6 +435,35 @@ class TestMainStartup:
         assert 'Configuration error' in caplog.text
         assert 'LOG_LEVEL' in caplog.text
         assert calls == [], 'setup_logging must not run before config is validated'
+
+    def test_invalid_log_level_does_not_reconfigure_logging(
+            self, monkeypatch, env_guard):
+        """A bad LOG_LEVEL leaves the existing logging setup untouched.
+
+        get_log_level() runs inside get_config_from_env(), so validation has
+        already failed by the time setup_logging() would run. Pinning the handler
+        list proves the operator still sees the 'Configuration error' line through
+        the handler that was already installed.
+        """
+        monkeypatch.setattr('sys.argv', ['main.py'])
+        env_guard({
+            'RADARR_URL': 'http://radarr:7878',
+            'RADARR_API_KEY': 'abc123',
+            'LOG_LEVEL': 'LOUD',
+        })
+        root = logging.getLogger()
+        saved_handlers, saved_level = list(root.handlers), root.level
+        try:
+            existing = logging.StreamHandler()
+            root.handlers = [existing]
+            root.setLevel(logging.WARNING)
+            with pytest.raises(SystemExit):
+                main.main()
+            assert root.handlers == [existing]
+            assert root.level == logging.WARNING
+        finally:
+            root.handlers = saved_handlers
+            root.setLevel(saved_level)
 
     def test_lowercase_log_level_is_accepted(self, monkeypatch, env_guard):
         """A lowercase LOG_LEVEL normalises instead of aborting startup."""
