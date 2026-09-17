@@ -99,7 +99,7 @@ Example log output (with `LOG_LEVEL: DEBUG`):
 ```
 2025-04-27 12:00:00,000 - INFO - Logging initialized at level: DEBUG
 2025-04-27 12:00:00,001 - DEBUG - Debug logging enabled
-2025-04-27 12:00:00,001 - INFO - Starting Radarr Tag Updater v1.0.4
+2025-04-27 12:00:00,001 - INFO - Starting Radarr Tag Updater v1.0.5
 2025-04-27 12:00:01,200 - DEBUG - Config loaded from environment successfully
 2025-04-27 12:00:02,300 - INFO - Creating missing tag: 4k
 2025-04-27 12:00:05,400 - DEBUG - Movie: Inception - Score: 150 - Tag: positive-score
