@@ -134,6 +134,19 @@ class TestAddSpecialTags:
             make_movie(), movie_file, tag_map, [3], base_config)
         assert tag_map['motong'] not in result
 
+    @pytest.mark.parametrize('group', ['motong-1080p', 'XMOTONGX', 'motongx'])
+    def test_motong_requires_an_exact_match(self, tag_map, base_config, group):
+        """The match is exact (case-insensitive), not a substring test.
+
+        Pins the behaviour the README documents, so a future switch to a
+        'contains' check cannot land unnoticed.
+        """
+        base_config['tag_motong_enabled'] = True
+        movie_file = make_movie_file(release_group=group)
+        result = main.add_special_tags(
+            make_movie(), movie_file, tag_map, [3], base_config)
+        assert tag_map['motong'] not in result
+
     def test_4k_added_for_2160(self, tag_map, base_config):
         """2160p resolution is tagged when the feature is on."""
         base_config['tag_4k_enabled'] = True

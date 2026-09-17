@@ -6,6 +6,9 @@ the small slice of the ``requests.Session`` surface that ``RadarrAPI`` uses, and
 not make redundant network requests.
 """
 
+import faulthandler
+import os
+
 import pytest
 from requests.exceptions import HTTPError, RequestException
 from requests.structures import CaseInsensitiveDict
@@ -13,6 +16,12 @@ from requests.structures import CaseInsensitiveDict
 # The application module lives in a hyphenated directory, so rely on the root
 # conftest.py having already placed it on sys.path.
 import main  # noqa: E402  pylint: disable=wrong-import-position
+
+# Any test that reaches a real sleep is a bug (see the ``forbid_real_sleep``
+# fixture), so a hang means the guard is missing - not that we should wait. Dump
+# every thread's traceback after a few seconds and let the runner kill the file.
+_HANG_TIMEOUT_SECONDS = float(os.getenv('PYTEST_HANG_TIMEOUT', '10'))
+faulthandler.dump_traceback_later(_HANG_TIMEOUT_SECONDS, exit=True)
 
 DEFAULT_TAG_MAP = {
     'negative-score': 1,
@@ -201,3 +210,27 @@ def env_guard(monkeypatch):
                 monkeypatch.setenv(key, value)
 
     return _apply
+
+@pytest.fixture(autouse=True)
+def forbid_real_sleep(monkeypatch):
+    """Fail fast if production code tries to sleep for real.
+
+    ``main.main()`` polls forever in a ``while True`` loop, so a config-validation
+    regression (for example a non-positive ``INTERVAL_MINUTES`` slipping past the
+    bounds check) turns into an unbounded ``time.sleep(0)`` busy loop: the test
+    never returns, the mutation harness never advances, and CI burns its whole
+    job timeout with no useful diagnostic.
+
+    Replacing ``main.time.sleep`` makes that failure mode explicit and immediate.
+    Tests that exercise the loop patch ``main.time.sleep`` themselves; monkeypatch
+    is applied inside the test body, so their recorder still takes precedence over
+    this guard.
+    """
+    def _unexpected_sleep(seconds, *args, **kwargs):
+        raise AssertionError(
+            f"main.time.sleep({seconds!r}) was called for real - this test would "
+            "hang (the poll loop is unbounded). Expected the delay to be patched by "
+            "the test, or prevented by config validation in get_interval_minutes(). "
+            f"faulthandler kills the run after {_HANG_TIMEOUT_SECONDS}s.")
+
+    monkeypatch.setattr(main.time, 'sleep', _unexpected_sleep, raising=True)

@@ -116,6 +116,167 @@ class TestConfigFromEnv:
         with pytest.raises(ValueError, match='Missing required environment'):
             main.get_config_from_env()
 
+    @pytest.mark.parametrize('raw', ['info', 'Info', 'warning', ' debug '])
+    def test_log_level_is_normalised(self, env_guard, raw):
+        """A lowercase or padded LOG_LEVEL is normalised, not rejected.
+
+        logging.basicConfig() raises ValueError for lowercase names, so
+        normalising here is what keeps that from reaching the loop.
+        """
+        env_guard({
+            'RADARR_URL': 'http://radarr:7878',
+            'RADARR_API_KEY': 'abc123',
+            'LOG_LEVEL': raw,
+        })
+        config = main.get_config_from_env()
+        assert config['log_level'] == raw.strip().upper()
+
+    def test_unknown_log_level_raises_valueerror(self, env_guard):
+        """A bogus LOG_LEVEL is reported as a configuration error."""
+        env_guard({
+            'RADARR_URL': 'http://radarr:7878',
+            'RADARR_API_KEY': 'abc123',
+            'LOG_LEVEL': 'LOUD',
+        })
+        with pytest.raises(ValueError, match='LOG_LEVEL'):
+            main.get_config_from_env()
+
+class TestGetLogLevel:
+    """Validation performed by ``get_log_level``."""
+
+    @pytest.mark.parametrize('name', main.VALID_LOG_LEVELS)
+    def test_accepts_every_advertised_level(self, name):
+        """Every level named in VALID_LOG_LEVELS is accepted and returned as-is."""
+        assert main.get_log_level(name) == name
+
+    def test_advertised_levels_match_logging_and_stay_unique(self):
+        """VALID_LOG_LEVELS must be usable by logging and free of aliases.
+
+        logging.getLevelNamesMapping() also contains the aliases WARN and FATAL.
+        Advertising those would be wrong: the error message lists VALID_LOG_LEVELS
+        as the accepted set, and DEBUG/FATAL would then normalise to two spellings
+        of the same level. Guard against both kinds of drift here.
+        """
+        accepted = main.VALID_LOG_LEVELS
+        assert accepted == tuple(sorted(set(accepted), key=accepted.index))
+        for name in accepted:
+            assert name in logging.getLevelNamesMapping()
+            assert name.upper() == name
+        # The aliases exist in logging but are deliberately not advertised.
+        assert 'WARN' not in accepted
+        assert 'FATAL' not in accepted
+
+    def test_rejects_logging_aliases_with_actionable_message(self):
+        """WARN/FATAL are rejected, but the message must reveal the canonical name.
+
+        An operator who has LOG_LEVEL=WARN needs to be told the value is invalid
+        *and* which spelling to use, otherwise the fix is guesswork.
+        """
+        for alias, canonical in (('WARN', 'WARNING'), ('FATAL', 'CRITICAL')):
+            with pytest.raises(ValueError) as excinfo:
+                main.get_log_level(alias)
+            message = str(excinfo.value)
+            assert canonical in message
+
+    @pytest.mark.parametrize('raw', ['debug', 'WaRnInG', 'error', '  info  '])
+    def test_normalises_case_and_whitespace(self, raw):
+        """Case and surrounding whitespace are irrelevant."""
+        assert main.get_log_level(raw) == raw.strip().upper()
+
+    @pytest.mark.parametrize('raw', ['LOUD', 'verbose', 'INFOO', '', ' '])
+    def test_rejects_unknown_names(self, raw):
+        """Anything logging cannot use is rejected with the list of valid names.
+
+        The message must name the variable and quote the offending value so the
+        operator can fix the container's environment without reading the source.
+        """
+        with pytest.raises(ValueError) as excinfo:
+            main.get_log_level(raw)
+        message = str(excinfo.value)
+        assert 'LOG_LEVEL' in message
+        assert 'INFO' in message  # the list of valid names
+        assert repr(raw) in message
+
+class TestGetIntervalMinutes:
+    """Validation performed by ``get_interval_minutes``."""
+
+    @pytest.mark.parametrize('raw,expected', [
+        ('20', 20), ('1', 1), (' 45 ', 45), ('525600', 525_600)])
+    def test_accepts_valid_intervals(self, raw, expected):
+        """Whole numbers within range are returned as ints."""
+        assert main.get_interval_minutes(raw) == expected
+        assert isinstance(main.get_interval_minutes(raw), int)
+
+    @pytest.mark.parametrize('raw', ['0', '-1', '-20', '525601'])
+    def test_rejects_out_of_range(self, raw):
+        """Zero, negatives and absurdly long intervals abort startup.
+
+        A zero interval would busy-loop the container, and a negative one makes
+        time.sleep() raise on every cycle.
+        """
+        with pytest.raises(ValueError, match='INTERVAL_MINUTES'):
+            main.get_interval_minutes(raw)
+
+    @pytest.mark.parametrize('raw', ['soon', '', 'twenty', '1.5'])
+    def test_rejects_non_integers(self, raw):
+        """Non-numeric (and fractional, which would truncate to 0) input fails."""
+        with pytest.raises(ValueError, match='INTERVAL_MINUTES'):
+            main.get_interval_minutes(raw)
+
+class TestSetupLogging:
+    """Behaviour of ``setup_logging``.
+
+    The function mutates the global root logger, so these tests snapshot and
+    restore its level and handlers to avoid leaking state into other tests.
+    """
+
+    @pytest.fixture(autouse=True)
+    def restore_root_logger(self):
+        """Save and restore the root logger's handlers and level."""
+        root = logging.getLogger()
+        saved_handlers = list(root.handlers)
+        saved_level = root.level
+        yield
+        root.handlers = saved_handlers
+        root.setLevel(saved_level)
+
+    @pytest.mark.parametrize('name,expected_level', [
+        ('DEBUG', logging.DEBUG),
+        ('INFO', logging.INFO),
+        ('WARNING', logging.WARNING),
+        ('ERROR', logging.ERROR),
+        ('CRITICAL', logging.CRITICAL),
+    ])
+    def test_sets_root_and_handler_level(self, name, expected_level):
+        """Both the root logger and the console handler honour the level."""
+        main.setup_logging(name)
+        root = logging.getLogger()
+        assert root.level == expected_level
+        assert len(root.handlers) == 1
+        assert root.handlers[0].level == expected_level
+
+    def test_uses_the_documented_log_format(self):
+        """The handler emits the documented 'time - level - message' format."""
+        main.setup_logging('INFO')
+        handler = logging.getLogger().handlers[0]
+        assert handler.formatter._fmt == \
+            '%(asctime)s - %(levelname)s - %(message)s'
+
+    def test_replaces_existing_handlers(self):
+        """Repeated calls do not stack duplicate handlers."""
+        main.setup_logging('INFO')
+        main.setup_logging('DEBUG')
+        assert len(logging.getLogger().handlers) == 1
+
+    def test_unknown_level_raises(self):
+        """setup_logging is not the guard; the config layer is.
+
+        Pinned so a future refactor cannot quietly move validation here instead
+        of failing fast before the loop starts.
+        """
+        with pytest.raises(ValueError):
+            main.setup_logging('LOUD')
+
 class TestGetScoreTag:
     """Boundary behaviour of ``get_score_tag``."""
 
@@ -221,6 +382,65 @@ class TestMainStartup:
             main.main()
         assert excinfo.value.code == 1
 
+    @pytest.mark.parametrize('raw', ['0', '-1', '-20'])
+    def test_non_positive_interval_exits_one(
+            self, monkeypatch, env_guard, caplog, raw):
+        """An interval below one minute is refused at startup.
+
+        '0' would busy-loop the container and a negative value makes
+        time.sleep() raise on every cycle, so both must fail before the loop.
+        """
+        monkeypatch.setattr('sys.argv', ['main.py'])
+        env_guard({
+            'RADARR_URL': 'http://radarr:7878',
+            'RADARR_API_KEY': 'abc123',
+            'INTERVAL_MINUTES': raw,
+        })
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(SystemExit) as excinfo:
+                main.main()
+        assert excinfo.value.code == 1
+        assert 'Configuration error' in caplog.text
+        assert 'INTERVAL_MINUTES' in caplog.text
+
+    def test_invalid_log_level_exits_one(self, monkeypatch, env_guard, caplog):
+        """A bad LOG_LEVEL is a configuration error, not a traceback.
+
+        setup_logging() runs inside the same guard, so the failure is reported
+        before logging is reconfigured.
+        """
+        monkeypatch.setattr('sys.argv', ['main.py'])
+        env_guard({
+            'RADARR_URL': 'http://radarr:7878',
+            'RADARR_API_KEY': 'abc123',
+            'LOG_LEVEL': 'LOUD',
+        })
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(SystemExit) as excinfo:
+                main.main()
+        assert excinfo.value.code == 1
+        assert 'Configuration error' in caplog.text
+        assert 'LOG_LEVEL' in caplog.text
+
+    def test_lowercase_log_level_is_accepted(self, monkeypatch, env_guard):
+        """A lowercase LOG_LEVEL normalises instead of aborting startup."""
+        monkeypatch.setattr('sys.argv', ['main.py'])
+        env_guard({
+            'RADARR_URL': 'http://radarr:7878',
+            'RADARR_API_KEY': 'abc123',
+            'LOG_LEVEL': 'debug',
+        })
+        seen = {}
+
+        def stop_after_setup(level):
+            seen['log_level'] = level
+            raise SystemExit(0)
+
+        monkeypatch.setattr(main, 'setup_logging', stop_after_setup)
+        with pytest.raises(SystemExit):
+            main.main()
+        assert seen['log_level'] == 'DEBUG'
+
 class TestMainLoop:
     """The retry/sleep behaviour of the long-running update loop."""
 
@@ -256,6 +476,26 @@ class TestMainLoop:
             main.main()
 
         assert slept == [20 * 60]
+
+    def test_minimum_interval_is_allowed(
+            self, monkeypatch, env_guard, base_config):
+        """INTERVAL_MINUTES=1 is the accepted lower bound and sleeps 60s."""
+        monkeypatch.setattr('sys.argv', ['main.py'])
+        env_guard({
+            'RADARR_URL': base_config['radarr_url'],
+            'RADARR_API_KEY': base_config['radarr_api_key'],
+            'INTERVAL_MINUTES': '1',
+        })
+        monkeypatch.setattr(main, 'get_config_from_env', lambda: dict(base_config))
+        monkeypatch.setattr(main, 'RadarrAPI', lambda *a, **kw: None)
+        monkeypatch.setattr(main, 'run_once', lambda *a, **kw: 0)
+        slept = []
+        self._stop_after_first_sleep(monkeypatch, slept)
+
+        with pytest.raises(SystemExit):
+            main.main()
+
+        assert slept == [60]
 
     def test_request_exception_retries_after_five_minutes(
             self, monkeypatch, env_guard, base_config):

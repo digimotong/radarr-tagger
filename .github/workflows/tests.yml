@@ -4,6 +4,15 @@ on:
   push:
   pull_request:
 
+# Least privilege: this workflow only reads the repository.
+permissions:
+  contents: read
+
+# A new push supersedes an in-flight run on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -14,10 +23,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -27,18 +36,27 @@ jobs:
           pip install -r requirements-dev.txt
         shell: bash
 
+      # Coverage flags are passed explicitly (not via pytest.ini addopts) so that
+      # running a single test file locally does not trip the coverage floor.
       - name: Run pytest
-        run: python -m pytest -v
+        # PYTEST_HANG_TIMEOUT (read by tests/conftest.py) is a backstop: the
+        # autouse sleep guard should turn any unbounded poll loop into an immediate
+        # failure, and if that guard is ever removed this still fails the job
+        # instead of burning its full timeout.
+        run: |
+          python -m pytest -v --cov=main --cov-report=term-missing --cov-fail-under=98
         shell: bash
+        env:
+          PYTEST_HANG_TIMEOUT: '60'
 
   lint:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
 
@@ -51,3 +69,35 @@ jobs:
       - name: Run pylint
         run: pylint radarr-tagger
         shell: bash
+
+  # The Dockerfile cannot be exercised by the unit tests: build it and prove the
+  # two properties the tests cannot see (it starts, and it does not run as root).
+  dockerfile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Build image
+        run: docker build -t radarr-tagger:ci .
+
+      - name: Container runs as a non-root user
+        run: |
+          uid="$(docker run --rm --entrypoint id radarr-tagger:ci -u)"
+          echo "container uid: $uid"
+          test "$uid" = "1000"
+
+      # --version short-circuits before any configuration is read, so this needs
+      # no env vars and cannot hit the network.
+      - name: Entrypoint starts and reports its version
+        run: docker run --rm radarr-tagger:ci python main.py --version
+
+      - name: Missing configuration fails fast with exit 1
+        run: |
+          set +e
+          output="$(docker run --rm radarr-tagger:ci python main.py 2>&1)"
+          status=$?
+          set -e
+          echo "$output"
+          test "$status" = "1"
+          echo "$output" | grep -q "Configuration error"

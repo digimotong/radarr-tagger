@@ -13,7 +13,8 @@ Automatically updates movie tags in Radarr based on custom format scores, releas
   - `4k` when resolution is 2160p (configurable via TAG_4K env var)
 
 - **Release group tagging**:
-  - `motong` when release group is "motong" (configurable via TAG_MOTONG env var)
+  - `motong` when the release group is exactly "motong" (case-insensitive, so
+    `MOTONG`/`MoToNg` match) — configurable via TAG_MOTONG env var
 
 ## Containerized Deployment
 
@@ -24,18 +25,36 @@ services:
   radarr-tagger:
     image: digimotong/radarr-tagger:latest
     container_name: radarr-tagger
-    restart: unless-stopped
+    restart: unless-stopped             # also start again after a host reboot
     depends_on:
       - radarr
     environment:
       RADARR_URL: http://radarr:7878  # Radarr instance URL
       RADARR_API_KEY: your-api-key    # Radarr API key (required)
-      LOG_LEVEL: INFO                 # DEBUG, INFO, WARNING, ERROR
+      LOG_LEVEL: INFO                 # DEBUG, INFO, WARNING, ERROR, CRITICAL
       SCORE_THRESHOLD: 100            # Threshold for positive-score
-      INTERVAL_MINUTES: 20            # Minutes between runs
+      INTERVAL_MINUTES: 20            # Minutes between runs (minimum 1)
       # TAG_4K: true                  # Enable 4k tagging
       # TAG_MOTONG: true              # Enable motong tagging
+    # Optional hardening: the container only makes outbound HTTP calls and
+    # writes no files, so it needs no privileges and no writable rootfs.
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
 ```
+
+> **Note on `restart`:** keep `unless-stopped`. `on-failure` deliberately does
+> not restart a container when the Docker daemon restarts, so the poller would
+> stay dead after a host reboot. If the configuration is wrong the container
+> exits immediately and is restarted, but each attempt logs a single
+> `Configuration error: ...` line instead of a traceback. Fix the environment
+> and **recreate the container** (`docker compose up -d --force-recreate
+> radarr-tagger`) — restarting it alone reuses the old environment.
+
 
 ### Required Environment Variables
 
@@ -48,9 +67,9 @@ services:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LOG_LEVEL` | `INFO` | Logging verbosity (DEBUG, INFO, WARNING, ERROR) |
+| `LOG_LEVEL` | `INFO` | Logging verbosity. Case-insensitive; one of `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
 | `SCORE_THRESHOLD` | `100` | Score threshold for positive-score tag |
-| `INTERVAL_MINUTES` | `20` | Minutes between automatic runs |
+| `INTERVAL_MINUTES` | `20` | Minutes between automatic runs (whole number, minimum 1) |
 | `TAG_4K` | `false` | Enable 4k resolution tagging |
 | `TAG_MOTONG` | `false` | Enable motong release group tagging |
 
@@ -64,7 +83,7 @@ The application automatically creates and manages these tags:
 | positive-score | customFormatScore > threshold |
 | no-score | No score or 0 ≤ score ≤ threshold |
 | 4k | Resolution is 2160p (requires TAG_4K=true) |
-| motong | Release group contains "motong" (requires TAG_MOTONG=true) |
+| motong | Release group is exactly "motong", case-insensitive (requires TAG_MOTONG=true) |
 
 Tags are created automatically if they don't exist in Radarr.
 
@@ -76,15 +95,80 @@ View container logs to monitor operation:
 docker logs radarr-tagger
 ```
 
-Example log output:
+Example log output (with `LOG_LEVEL: DEBUG`):
 ```
-2025-04-27 12:00:00 - INFO - Starting Radarr Tag Updater v1.0.0
-2025-04-27 12:00:02 - INFO - Processing 125 movies
-2025-04-27 12:00:05 - DEBUG - Movie: Inception - Score: 150 - Tag: positive-score
-2025-04-27 12:00:05 - DEBUG - Added 4k tag for Inception
-2025-04-27 12:00:10 - INFO - Processing complete. Updated 18/125 movies
-2025-04-27 12:00:10 - INFO - Next run in 20 minutes
+2025-04-27 12:00:00,000 - INFO - Logging initialized at level: DEBUG
+2025-04-27 12:00:00,001 - DEBUG - Debug logging enabled
+2025-04-27 12:00:00,001 - INFO - Starting Radarr Tag Updater v1.0.4
+2025-04-27 12:00:01,200 - DEBUG - Config loaded from environment successfully
+2025-04-27 12:00:02,300 - INFO - Creating missing tag: 4k
+2025-04-27 12:00:05,400 - DEBUG - Movie: Inception - Score: 150 - Tag: positive-score
+2025-04-27 12:00:05,401 - DEBUG - Added 4k tag for Inception
+2025-04-27 12:00:10,500 - INFO - Processing complete. Updated 18/125 movies
+2025-04-27 12:00:10,501 - INFO - Next run in 20 minutes
 ```
+
+## Command Line Options
+
+| Option | Description |
+|--------|-------------|
+| `--test` | Process only the first 5 movies, then continue the normal loop. Handy for a first run. |
+| `--version` | Print the version and exit without reading any configuration. |
+
+```bash
+docker run --rm digimotong/radarr-tagger:latest python main.py --version
+```
+
+## Configuration Errors
+
+Configuration is validated once at startup, before the update loop begins. A
+deployment that is misconfigured cannot fix itself by retrying, so instead of
+crash-looping with a traceback the container logs one line and exits with
+status 1:
+
+```
+ERROR:root:Configuration error: INTERVAL_MINUTES must be between 1 and 525600 minutes (got 0)
+```
+
+| Condition | Result |
+|-----------|--------|
+| `RADARR_URL` or `RADARR_API_KEY` missing/empty | Exits 1, names the missing variables |
+| `LOG_LEVEL` is not a level `logging` knows | Exits 1 (values are case-insensitive, so `info` works) |
+| `INTERVAL_MINUTES` not a whole number, below 1, or above 525600 | Exits 1 |
+
+The `ERROR:root:` prefix is expected: the message is emitted before logging is
+reconfigured so that it is always visible.
+
+Under the recommended `restart: unless-stopped` policy the container keeps
+restarting while the environment stays broken, so each bad deployment produces
+one readable line per restart rather than an endless traceback. Correct the
+environment and recreate the container to recover.
+
+## Development
+
+Requires Python 3.12+ (the container and CI use 3.12; tests also run on 3.13).
+
+```bash
+python -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m pytest -q          # test suite + coverage floor
+.venv/bin/pylint radarr-tagger         # must stay at 10.00/10
+```
+
+The application code lives in `radarr-tagger/` (a hyphenated directory, so the
+root `conftest.py` puts it on `sys.path` for the tests).
+
+## Releasing
+
+1. Bump `VERSION` in `radarr-tagger/main.py`.
+2. Commit, tag `vX.Y.Z` (matching `VERSION`), and publish a GitHub release.
+3. The release workflow lints, tests, verifies that the tag matches `VERSION`,
+   then builds and pushes `linux/amd64` and `linux/arm64` images.
+
+`docker/metadata-action` publishes the exact `X.Y.Z` tag plus `latest` for any
+non-prerelease semver tag, so `latest` and `X.Y.Z` point at the same digest for
+a release. A tag published as a prerelease (for example `-rc1` on the next
+version) does **not** move `latest`.
 
 ## Requirements
 

@@ -27,6 +27,15 @@ REQUEST_TIMEOUT = 30
 # Environment variables that must be present and non-empty for the tool to run.
 REQUIRED_ENV_VARS = ('RADARR_URL', 'RADARR_API_KEY')
 
+# Bounds for INTERVAL_MINUTES. A zero/negative interval turns the poll loop into
+# an unbounded busy loop (time.sleep(0) returns instantly), and an absurd value
+# silently stops the container from ever updating again. Reject both at startup.
+MIN_INTERVAL_MINUTES = 1
+MAX_INTERVAL_MINUTES = 525_600  # one year
+
+# Log levels accepted in LOG_LEVEL, as a case-insensitive lookup.
+VALID_LOG_LEVELS = ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
+
 class RadarrAPI:
     """Client for Radarr API interactions"""
 
@@ -126,7 +135,7 @@ def get_config_from_env():
     config = {
         'radarr_url': os.environ['RADARR_URL'],      # safe: guard proved it exists
         'radarr_api_key': os.environ['RADARR_API_KEY'],
-        'log_level': os.getenv('LOG_LEVEL', 'INFO'),
+        'log_level': get_log_level(os.getenv('LOG_LEVEL', 'INFO')),
         'score_threshold': int(os.getenv('SCORE_THRESHOLD', '100')),
         'tag_motong_enabled': os.getenv('TAG_MOTONG', 'false').lower() == 'true',
         'tag_4k_enabled': os.getenv('TAG_4K', 'false').lower() == 'true'
@@ -134,6 +143,38 @@ def get_config_from_env():
 
     logging.debug("Config loaded from environment successfully")
     return config
+
+def get_log_level(raw: str) -> str:
+    """Normalise ``LOG_LEVEL`` so an unknown value cannot silently disable logs.
+
+    ``logging`` accepts any unknown level name and installs a handler that drops
+    every record at that level, so a typo like ``LOG_LEVEL=VERBOSE`` produces a
+    container that looks healthy while logging nothing at all.
+    """
+    level = (raw or '').strip().upper()
+    if level not in VALID_LOG_LEVELS:
+        raise ValueError(
+            f"LOG_LEVEL must be one of {', '.join(VALID_LOG_LEVELS)} "
+            f"(got {raw!r})")
+    return level
+
+def get_interval_minutes(raw: str) -> int:
+    """Validate ``INTERVAL_MINUTES`` so the poll loop always gets a sane delay.
+
+    Zero or negative values make ``time.sleep`` return immediately, spinning the
+    loop in a tight CPU-burning cycle, so they are rejected rather than clamped.
+    """
+    try:
+        interval_minutes = int(raw)
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"INTERVAL_MINUTES must be a whole number of minutes (got {raw!r})") from e
+
+    if not MIN_INTERVAL_MINUTES <= interval_minutes <= MAX_INTERVAL_MINUTES:
+        raise ValueError(
+            f"INTERVAL_MINUTES must be between {MIN_INTERVAL_MINUTES} and "
+            f"{MAX_INTERVAL_MINUTES} minutes (got {interval_minutes})")
+    return interval_minutes
 
 def get_score_tag(score: int, threshold: int) -> str:
     """Determine the appropriate score tag based on customFormatScore"""
@@ -269,11 +310,14 @@ def main():
     # rather than crash-looping under a container restart policy.
     try:
         config = get_config_from_env()
-        interval_minutes = int(os.getenv('INTERVAL_MINUTES', '20'))
+        interval_minutes = get_interval_minutes(
+            os.getenv('INTERVAL_MINUTES', '20'))
     except ValueError as e:
         logging.error("Configuration error: %s", e)
         sys.exit(1)
 
+    # Inside the guard on purpose: setup_logging() can itself raise ValueError for
+    # an invalid level, and that must not escape as a traceback either.
     setup_logging(config['log_level'])
     logging.info("Starting Radarr Tag Updater v%s", VERSION)
 
