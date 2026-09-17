@@ -20,6 +20,13 @@ from requests.exceptions import RequestException
 # enabled, so disabling either flag also removes that tag from all movies.
 MANAGED_TAGS = ['negative-score', 'positive-score', 'no-score', 'motong', '4k']
 
+# HTTP calls block indefinitely when no timeout is supplied, which would leave the
+# long-running update loop wedged forever on a half-open connection.
+REQUEST_TIMEOUT = 30
+
+# Environment variables that must be present and non-empty for the tool to run.
+REQUIRED_ENV_VARS = ('RADARR_URL', 'RADARR_API_KEY')
+
 class RadarrAPI:
     """Client for Radarr API interactions"""
 
@@ -28,17 +35,16 @@ class RadarrAPI:
         self.base_url = base_url.rstrip('/')
         self.api_key = api_key
         self.session = session if session is not None else requests.Session()
-        if hasattr(self.session, 'headers'):
-            self.session.headers.update({
-                'X-Api-Key': self.api_key,
-                'Accept': 'application/json'
-            })
+        self.session.headers.update({
+            'X-Api-Key': self.api_key,
+            'Accept': 'application/json'
+        })
 
     def get_movies(self) -> List[Dict]:
         """Fetch all movies from Radarr"""
         endpoint = f"{self.base_url}/api/v3/movie"
         try:
-            response = self.session.get(endpoint)
+            response = self.session.get(endpoint, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             return response.json()
         except RequestException as e:
@@ -49,7 +55,7 @@ class RadarrAPI:
         """Fetch all tags from Radarr"""
         endpoint = f"{self.base_url}/api/v3/tag"
         try:
-            response = self.session.get(endpoint)
+            response = self.session.get(endpoint, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             return response.json()
         except RequestException as e:
@@ -62,7 +68,7 @@ class RadarrAPI:
         try:
             response = self.session.post(endpoint, json={
                 'label': label
-            })
+            }, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             return response.json()
         except RequestException as e:
@@ -73,7 +79,7 @@ class RadarrAPI:
         """Fetch movie file details from Radarr"""
         endpoint = f"{self.base_url}/api/v3/moviefile/{movie_file_id}"
         try:
-            response = self.session.get(endpoint)
+            response = self.session.get(endpoint, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             return response.json()
         except RequestException as e:
@@ -84,7 +90,8 @@ class RadarrAPI:
         """Update a movie in Radarr"""
         endpoint = f"{self.base_url}/api/v3/movie/{movie_id}"
         try:
-            response = self.session.put(endpoint, json=movie_data)
+            response = self.session.put(endpoint, json=movie_data,
+                                        timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             return True
         except RequestException as e:
@@ -111,19 +118,19 @@ def parse_args():
 
 def get_config_from_env():
     """Load configuration from environment variables"""
+    missing = [name for name in REQUIRED_ENV_VARS if not os.getenv(name)]
+    if missing:
+        raise ValueError(
+            "Missing required environment variables: " + ", ".join(missing))
+
     config = {
-        'radarr_url': os.environ['RADARR_URL'],
+        'radarr_url': os.environ['RADARR_URL'],      # safe: guard proved it exists
         'radarr_api_key': os.environ['RADARR_API_KEY'],
         'log_level': os.getenv('LOG_LEVEL', 'INFO'),
         'score_threshold': int(os.getenv('SCORE_THRESHOLD', '100')),
         'tag_motong_enabled': os.getenv('TAG_MOTONG', 'false').lower() == 'true',
         'tag_4k_enabled': os.getenv('TAG_4K', 'false').lower() == 'true'
     }
-
-    # Validate required fields
-    if not config['radarr_url'] or not config['radarr_api_key']:
-        raise ValueError("Missing required environment variables: "
-                       "RADARR_URL and RADARR_API_KEY must be set")
 
     logging.debug("Config loaded from environment successfully")
     return config
@@ -257,12 +264,20 @@ def main():
         print(f"Radarr Tag Updater v{VERSION}")
         sys.exit(0)
 
-    config = get_config_from_env()
+    # Load the config before the loop starts. A misconfigured deployment cannot
+    # recover by retrying, so fail fast with a single log line (no traceback)
+    # rather than crash-looping under a container restart policy.
+    try:
+        config = get_config_from_env()
+        interval_minutes = int(os.getenv('INTERVAL_MINUTES', '20'))
+    except ValueError as e:
+        logging.error("Configuration error: %s", e)
+        sys.exit(1)
+
     setup_logging(config['log_level'])
     logging.info("Starting Radarr Tag Updater v%s", VERSION)
 
     api = RadarrAPI(config['radarr_url'], config['radarr_api_key'])
-    interval_minutes = int(os.getenv('INTERVAL_MINUTES', '20'))
 
     while True:
         try:

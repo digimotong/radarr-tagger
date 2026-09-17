@@ -21,6 +21,18 @@ class TestInit:
         assert session.headers['X-Api-Key'] == 'test-key'
         assert session.headers['Accept'] == 'application/json'
 
+    @pytest.mark.parametrize('name', ['X-Api-Key', 'x-api-key', 'X-API-KEY'])
+    def test_auth_header_lookup_is_case_insensitive(self, name):
+        """requests.Session.headers is case-insensitive; the fake must match."""
+        _, session = make_api()
+        assert session.headers[name] == 'test-key'
+
+    @pytest.mark.parametrize('name', ['Accept', 'accept', 'ACCEPT'])
+    def test_accept_header_lookup_is_case_insensitive(self, name):
+        """The Accept header is likewise comparable regardless of case."""
+        _, session = make_api()
+        assert session.headers[name] == 'application/json'
+
     def test_strips_trailing_slash(self):
         """A trailing slash on the base URL is normalised away."""
         api, _ = make_api(base_url='http://radarr:7878/')
@@ -158,3 +170,50 @@ class TestUpdateMovie:
         with caplog.at_level('ERROR'):
             api.update_movie(5, {'id': 5})
         assert 'Failed to update movie 5' in caplog.text
+
+class TestTimeouts:
+    """Every HTTP call must carry an explicit timeout.
+
+    Without one, ``requests`` blocks forever, which would hang the long-running
+    update loop on a half-open connection.
+    """
+
+    def _assert_timeout(self, session):
+        """Assert the most recent call passed the configured timeout."""
+        assert session.calls[-1]['kwargs']['timeout'] == main.REQUEST_TIMEOUT
+
+    def test_get_movies(self):
+        """get_movies passes the timeout through to the session."""
+        api, session = make_api({'get': FakeResponse([{'id': 1}])})
+        api.get_movies()
+        self._assert_timeout(session)
+
+    def test_get_tags(self):
+        """get_tags passes the timeout through to the session."""
+        api, session = make_api({'get': FakeResponse([{'id': 1, 'label': 'x'}])})
+        api.get_tags()
+        self._assert_timeout(session)
+
+    def test_create_tag(self):
+        """create_tag passes the timeout through to the session."""
+        api, session = make_api({'post': FakeResponse({'id': 6, 'label': 'no-score'})})
+        api.create_tag('no-score')
+        self._assert_timeout(session)
+
+    def test_get_movie_file(self):
+        """get_movie_file passes the timeout through to the session."""
+        api, session = make_api({'get': FakeResponse({'id': 10})})
+        api.get_movie_file(10)
+        self._assert_timeout(session)
+
+    def test_update_movie(self):
+        """update_movie passes the timeout through to the session."""
+        api, session = make_api({'put': FakeResponse({})})
+        api.update_movie(5, {'id': 5})
+        self._assert_timeout(session)
+
+    def test_timeout_is_a_positive_number(self):
+        """The configured timeout must be a usable, positive value."""
+        assert isinstance(main.REQUEST_TIMEOUT, (int, float))
+        assert main.REQUEST_TIMEOUT > 0
+

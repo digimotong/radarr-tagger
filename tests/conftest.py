@@ -8,6 +8,7 @@ not make redundant network requests.
 
 import pytest
 from requests.exceptions import HTTPError, RequestException
+from requests.structures import CaseInsensitiveDict
 
 # The application module lives in a hyphenated directory, so rely on the root
 # conftest.py having already placed it on sys.path.
@@ -47,7 +48,9 @@ class FakeSession:
 
     def __init__(self, responses=None):
         self.responses = responses or {}
-        self.headers = {}
+        # Mirrors requests.Session.headers, which is a CaseInsensitiveDict so that
+        # header lookups are case-insensitive in production as well as in tests.
+        self.headers = CaseInsensitiveDict()
         self.calls = []
 
     def _record(self, method, url, kwargs):
