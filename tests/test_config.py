@@ -406,8 +406,14 @@ class TestMainStartup:
     def test_invalid_log_level_exits_one(self, monkeypatch, env_guard, caplog):
         """A bad LOG_LEVEL is a configuration error, not a traceback.
 
-        setup_logging() runs inside the same guard, so the failure is reported
-        before logging is reconfigured.
+        setup_logging() runs inside the same guard, so the failure is reported as
+        a clean 'Configuration error' before logging is reconfigured. Asserting on
+        the call count is what makes this test able to tell the two orderings
+        apart: if setup_logging() were hoisted above the try block, get_log_level
+        would still raise ValueError from inside get_config_from_env() and still
+        exit 1, so the exit code alone cannot distinguish them - but logging would
+        have been reconfigured first, and a half-configured logger is exactly the
+        outcome the guard exists to prevent.
         """
         monkeypatch.setattr('sys.argv', ['main.py'])
         env_guard({
@@ -415,12 +421,19 @@ class TestMainStartup:
             'RADARR_API_KEY': 'abc123',
             'LOG_LEVEL': 'LOUD',
         })
+        calls = []
+
+        def record_setup_logging(level):
+            calls.append(level)
+
+        monkeypatch.setattr(main, 'setup_logging', record_setup_logging)
         with caplog.at_level(logging.ERROR):
             with pytest.raises(SystemExit) as excinfo:
                 main.main()
         assert excinfo.value.code == 1
         assert 'Configuration error' in caplog.text
         assert 'LOG_LEVEL' in caplog.text
+        assert calls == [], 'setup_logging must not run before config is validated'
 
     def test_lowercase_log_level_is_accepted(self, monkeypatch, env_guard):
         """A lowercase LOG_LEVEL normalises instead of aborting startup."""
