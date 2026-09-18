@@ -65,8 +65,10 @@ The application automatically creates and manages these tags:
 | no-score | No score or 0 ≤ score ≤ threshold |
 | 4k | Resolution is 2160p (requires TAG_4K=true) |
 | motong | Release group is "motong" (requires TAG_MOTONG=true) |
+| _none_ | Other tags are left untouched; a movie whose tags already match is not written to |
 
-Tags are created automatically if they don't exist in Radarr.
+Tags are created automatically if they don't exist in Radarr. Disabling a feature
+flag removes its tag from movies that already have it.
 
 ## Monitoring
 
@@ -78,7 +80,7 @@ docker logs radarr-tagger
 
 Example log output (with `LOG_LEVEL: DEBUG`):
 ```
-2025-04-27 12:00:00,000 - INFO - Starting Radarr Tag Updater v1.0.6
+2025-04-27 12:00:00,000 - INFO - Starting Radarr Tag Updater v1.0.7
 2025-04-27 12:00:02,300 - INFO - Creating missing tag: 4k
 2025-04-27 12:00:05,400 - DEBUG - Movie: Inception - Score: 150 - Tag: positive-score
 2025-04-27 12:00:10,500 - INFO - Processing complete. Updated 18/125 movies

@@ -83,6 +83,39 @@ class TestProcessMovieTagsPreservesUnmanaged:
         assert 99 in api.updates[0][1]['tags']
         assert 3 in api.updates[0][1]['tags']
 
+    def test_all_unmanaged_library_tags_are_preserved(self, full_tag_map,
+                                                      base_config):
+        """A realistic tag map must not cause unrelated tags to be erased.
+
+        ``ensure_required_tags()`` returns a map of *every* tag in Radarr, so the
+        managed set must be derived from MANAGED_TAGS. Deriving it from the map's
+        values instead silently stripped tags such as 'requested' and
+        'potential-delete' from every movie on every pass.
+        """
+        movie = make_movie(tags=[full_tag_map['requested'],
+                                 full_tag_map['potential-delete']],
+                           movie_file_id=10)
+        api = FakeRadarrAPI(movie_files={10: make_movie_file(score=0)})
+        assert main.process_movie_tags(
+            api, movie, full_tag_map, 100, base_config) is True
+        tags = api.updates[0][1]['tags']
+        assert full_tag_map['requested'] in tags, "unmanaged tag stripped"
+        assert full_tag_map['potential-delete'] in tags, "unmanaged tag stripped"
+        assert 3 in tags
+
+    def test_unmanaged_tags_survive_when_features_disabled(self, full_tag_map,
+                                                           base_config):
+        """Unmanaged tags are kept even when optional tag features are off."""
+        base_config = dict(base_config, tag_motong_enabled=True,
+                           tag_4k_enabled=True)
+        movie = make_movie(tags=[4, 5, full_tag_map['potential-delete']],
+                           movie_file_id=10)
+        api = FakeRadarrAPI(movie_files={10: make_movie_file(score=0)})
+        main.process_movie_tags(api, movie, full_tag_map, 100, base_config)
+        tags = api.updates[0][1]['tags']
+        assert full_tag_map['potential-delete'] in tags
+        assert 4 not in tags and 5 not in tags
+
     def test_multiple_unmanaged_tags_are_preserved(self, tag_map, base_config):
         """Several custom tag IDs are all retained."""
         movie = make_movie(tags=[42, 43], movie_file_id=10)
@@ -214,6 +247,51 @@ class TestRunOnce:
         api = FakeRadarrAPI(movies=[movie], tags=[],
                             movie_files={10: make_movie_file(score=0)})
         assert main.run_once(api, base_config) == 0
+
+    def test_run_once_preserves_unmanaged_tags(self, base_config):
+        """A full pass keeps unmanaged tags while still applying score tags.
+
+        End-to-end guard for the tag-wiping bug: run_once() feeds the *real*
+        ensure_required_tags() map (which contains every tag in Radarr) into the
+        per-movie tag logic, so this test fails if the managed set is derived
+        from that map's values rather than from MANAGED_TAGS.
+        """
+        library_tags = [{'id': i, 'label': label}
+                        for i, label in enumerate(main.MANAGED_TAGS, start=1)]
+        library_tags += [{'id': 99, 'label': 'potential-delete'}]
+        movie = make_movie(movie_id=1, title='Keep Me', tags=[99],
+                          movie_file_id=10)
+        api = FakeRadarrAPI(movies=[movie], tags=library_tags,
+                            movie_files={10: make_movie_file(score=0)})
+        assert main.run_once(api, base_config) == 1
+        tags = api.updates[0][1]['tags']
+        assert 99 in tags, "run_once stripped an unmanaged tag"
+        assert 3 in tags   # no-score, still applied
+
+    def test_second_pass_does_not_strip_unmanaged_tags(self, base_config):
+        """Repeated passes are stable: tags are not eroded run after run."""
+        library_tags = [{'id': i, 'label': label}
+                        for i, label in enumerate(main.MANAGED_TAGS, start=1)]
+        library_tags += [{'id': 99, 'label': 'potential-delete'}]
+        movies = [make_movie(movie_id=1, title='A', tags=[99],
+                             movie_file_id=10),
+                  make_movie(movie_id=2, title='B', tags=[],
+                             movie_file_id=11)]
+        api = FakeRadarrAPI(movies=movies, tags=library_tags,
+                            movie_files={10: make_movie_file(score=0),
+                                         11: make_movie_file(score=0)})
+        main.run_once(api, base_config)
+        first_pass = dict(api.updates)[1]['tags']
+        assert 99 in first_pass
+        # Feed the updated movie back in, as Radarr would on the next run.
+        api.movies = [make_movie(movie_id=1, title='A', tags=first_pass,
+                                 movie_file_id=10),
+                      make_movie(movie_id=2, title='B',
+                                 tags=dict(api.updates)[2]['tags'],
+                                 movie_file_id=11)]
+        api.updates = []
+        assert main.run_once(api, base_config) == 0
+        assert api.updates == [], "a stable library must not be rewritten"
 
     def test_ensures_tags_before_processing(self, base_config):
         """Tag creation happens as part of a single pass."""
