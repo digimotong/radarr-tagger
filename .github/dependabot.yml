@@ -8,6 +8,17 @@ updates:
       interval: weekly
     commit-message:
       prefix: "ci"
+    groups:
+      actions:
+        patterns:
+          - "*"
+        # Majors are deliberately excluded: they are the updates most likely to
+        # need a workflow change (input removals, runner or Node bumps), so they
+        # stay as their own PR instead of riding along inside a bundle of
+        # routine bumps that looks safe to merge.
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: pip
     directory: /
@@ -15,8 +26,21 @@ updates:
       interval: weekly
     commit-message:
       prefix: "deps"
+    groups:
+      python:
+        patterns:
+          - "*"
+        # Same reasoning as the actions group above: pytest/pylint majors have
+        # historically changed test discovery and default checks, so they are
+        # reviewed on their own rather than inside a routine bump bundle.
+        update-types:
+          - "minor"
+          - "patch"
 
-  # Tracks the pinned python:3.12-slim-* base image in the Dockerfile.
+  # Tracks the pinned python:3.14-slim-* base image in the Dockerfile.
+  # Left ungrouped on purpose: there is only one dependency here, so a group
+  # would change nothing, and grouping would risk a future major (e.g. 3.15)
+  # arriving bundled with a routine minor.
   - package-ecosystem: docker
     directory: /
     schedule:
