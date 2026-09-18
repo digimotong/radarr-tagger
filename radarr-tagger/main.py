@@ -9,7 +9,7 @@ import sys
 import argparse
 import logging
 import time
-from typing import Dict, List
+from typing import Dict, List, Set
 import requests
 from requests.exceptions import RequestException
 
@@ -68,10 +68,27 @@ class RadarrAPI:
         endpoint = f"{self.base_url}/api/v3/movie"
         try:
             response = self.session.get(endpoint, timeout=REQUEST_TIMEOUT)
+            _raise_on_auth_failure(response)
             response.raise_for_status()
             return response.json()
         except RequestException as e:
             logging.error("Failed to fetch movies: %s", str(e))
+            raise
+
+    def get_movie(self, movie_id: int) -> Dict:
+        """Fetch a single movie from Radarr.
+
+        Used to re-read immediately before a write so the PUT is not built from
+        a resource fetched at the start of the pass (see process_movie_tags).
+        """
+        endpoint = f"{self.base_url}/api/v3/movie/{movie_id}"
+        try:
+            response = self.session.get(endpoint, timeout=REQUEST_TIMEOUT)
+            _raise_on_auth_failure(response)
+            response.raise_for_status()
+            return response.json()
+        except RequestException as e:
+            logging.error("Failed to fetch movie %s: %s", movie_id, str(e))
             raise
 
     def get_tags(self) -> List[Dict]:
@@ -79,6 +96,7 @@ class RadarrAPI:
         endpoint = f"{self.base_url}/api/v3/tag"
         try:
             response = self.session.get(endpoint, timeout=REQUEST_TIMEOUT)
+            _raise_on_auth_failure(response)
             response.raise_for_status()
             return response.json()
         except RequestException as e:
@@ -219,6 +237,37 @@ def get_score_tag(score: int, threshold: int) -> str:
 
 VERSION = "1.0.7"
 
+def _merge_fresh_tags(
+        fresh_movie: Dict,
+        current_tags: Set[int],
+        managed_tag_ids: Set[int],
+        new_tag_ids: List[int]) -> List[int]:
+    """Recompute the tags to write from a freshly read movie.
+
+    ``process_movie_tags`` decides its tag list from a snapshot that can be
+    minutes old, and Radarr has no partial-update endpoint for movies
+    (/api/v3/movie/editor returns 404), so the PUT carries the whole resource.
+    Re-reading the movie is therefore not sufficient on its own: if the user
+    added a tag while the pass was running, writing the stale list would drop it.
+    This keeps every unmanaged tag the movie has *now* and re-applies this tool's
+    own tags on top, so the fresh state wins.
+    """
+    fresh_current_tags = set(fresh_movie.get('tags', []))
+    if fresh_current_tags == current_tags:
+        return new_tag_ids
+
+    logging.debug(
+        "Tags changed for %s during this pass (%s -> %s); merging",
+        fresh_movie.get('title'), sorted(current_tags), sorted(fresh_current_tags))
+    merged_tag_ids = [tag_id for tag_id in fresh_current_tags
+                      if tag_id not in managed_tag_ids]
+    # Preserve the order the tags were computed in (score tag first, then the
+    # optional ones) minus any that the fresh read already lists.
+    for tag_id in new_tag_ids:
+        if tag_id not in merged_tag_ids:
+            merged_tag_ids.append(tag_id)
+    return merged_tag_ids
+
 def process_movie_tags(
         api: RadarrAPI,
         movie: Dict,
@@ -226,7 +275,6 @@ def process_movie_tags(
         score_threshold: int,
         config: Dict) -> bool:
     """Process and update tags for a single movie"""
-    movie_update = movie.copy()
     current_tags = set(movie.get('tags', []))
 
     # Remove any existing managed tags (by ID). The label->id mapping is already
@@ -248,6 +296,16 @@ def process_movie_tags(
                       preserved_tag_ids, movie['title'])
 
     # Get movie file and score
+    #
+    # Deliberate N+1 - do not "optimise" this away. The movieFile object embedded
+    # in the GET /api/v3/movie response does NOT carry the score: customFormatScore
+    # is null there for all 467 movies (Radarr 6.0.4.10291), so reading it from the
+    # list payload would silently tag every movie 'no-score'. There is no bulk
+    # alternative either - both verified against the live API:
+    #   GET /api/v3/moviefile            -> 400 (an id is required)
+    #   GET /api/v3/moviefile?movieIds=.. -> 400 (repeated or comma form)
+    #   GET /api/v3/moviefile/bulk       -> 404 (does not exist)
+    # One request per movie file is the only way to obtain the real score.
     score = None
     movie_file = None
     if movie.get('movieFileId'):
@@ -271,8 +329,28 @@ def process_movie_tags(
 
     # Only update if tags changed
     if set(new_tag_ids) != current_tags:
-        movie_update['tags'] = new_tag_ids
-        return api.update_movie(movie['id'], movie_update)
+        # Re-read the movie immediately before writing. ``movie`` was captured at
+        # the start of a pass that makes one request per movie file, so a user
+        # editing tags in the Radarr UI minutes later would otherwise have that
+        # edit reverted by this PUT, which sends the whole stale resource back.
+        # Re-fetching narrows the window from the length of the pass to a single
+        # round-trip. A failed refresh skips the write rather than gambling on
+        # stale data.
+        try:
+            fresh_movie = api.get_movie(movie['id'])
+        except RequestException:
+            logging.warning(
+                "Skipping tag update for %s: could not re-read movie", movie['title'])
+            return False
+
+        # Re-read alone is not enough: the tag list is also recomputed from the
+        # fresh snapshot, or a tag the user added during the pass is still lost
+        # (see _merge_fresh_tags).
+        new_tag_ids = _merge_fresh_tags(
+            fresh_movie, current_tags, managed_tag_ids, new_tag_ids)
+
+        fresh_movie['tags'] = new_tag_ids
+        return api.update_movie(movie['id'], fresh_movie)
     return False
 
 def add_special_tags(

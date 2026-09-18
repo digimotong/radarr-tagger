@@ -4,7 +4,29 @@ import pytest
 from requests.exceptions import RequestException
 
 import main
-from conftest import FakeRadarrAPI, make_movie, make_movie_file
+from conftest import FakeRadarrAPI, FakeResponse, FakeSession, make_movie, make_movie_file
+
+def make_api_client(responses=None):
+    """Build a real ``main.RadarrAPI`` wired to a ``FakeSession``.
+
+    Used where the test needs the actual HTTP client code paths (URL building,
+    status-code handling) rather than the ``FakeRadarrAPI`` behaviour double.
+    """
+    session = FakeSession(responses)
+    return main.RadarrAPI('http://radarr:7878', 'test-key', session=session), session
+
+def make_api_for(movie, **kwargs):
+    """Build a ``FakeRadarrAPI`` that can serve ``movie`` back from both the
+    library list and the single-movie endpoint.
+
+    ``process_movie_tags`` re-reads a movie immediately before writing (so the
+    PUT is based on current server state, not a snapshot taken at the start of a
+    pass), which means a movie must exist in ``api.movies`` for a write to
+    happen at all. Registering it here keeps each test focused on tag logic
+    instead of repeating that setup. ``movie`` is copied so the fixture object
+    the test still holds is never the one the code under test mutates.
+    """
+    return FakeRadarrAPI(movies=[dict(movie)], **kwargs)
 
 class TestProcessMovieTagsNoChange:
     """Cases where nothing should be written back to Radarr."""
@@ -12,7 +34,7 @@ class TestProcessMovieTagsNoChange:
     def test_no_update_when_tags_already_correct(self, tag_map, base_config):
         """A movie whose tags already match produces no PUT."""
         movie = make_movie(tags=[3], movie_file_id=10)
-        api = FakeRadarrAPI(movie_files={10: make_movie_file(score=0)})
+        api = make_api_for(movie, movie_files={10: make_movie_file(score=0)})
         result = main.process_movie_tags(
             api, movie, tag_map, 100, base_config)
         assert result is False
@@ -31,7 +53,7 @@ class TestProcessMovieTagsNoChange:
                                                           base_config):
         """A missing file still gets the no-score tag applied."""
         movie = make_movie(tags=[], movie_file_id=None)
-        api = FakeRadarrAPI()
+        api = make_api_for(movie)
         assert main.process_movie_tags(
             api, movie, tag_map, 100, base_config) is True
         assert api.updates[0][1]['tags'] == [3]
@@ -49,7 +71,7 @@ class TestProcessMovieTagsScore:
                                         expected_id):
         """Each score band applies the corresponding tag."""
         movie = make_movie(tags=[], movie_file_id=10)
-        api = FakeRadarrAPI(movie_files={10: make_movie_file(score=score)})
+        api = make_api_for(movie, movie_files={10: make_movie_file(score=score)})
         assert main.process_movie_tags(
             api, movie, tag_map, 100, base_config) is True
         assert api.updates[0][1]['tags'] == [expected_id]
@@ -57,7 +79,7 @@ class TestProcessMovieTagsScore:
     def test_none_score_maps_to_no_score(self, tag_map, base_config):
         """A null customFormatScore is treated as no-score."""
         movie = make_movie(tags=[], movie_file_id=10)
-        api = FakeRadarrAPI(movie_files={10: make_movie_file(score=None)})
+        api = make_api_for(movie, movie_files={10: make_movie_file(score=None)})
         assert main.process_movie_tags(
             api, movie, tag_map, 100, base_config) is True
         assert api.updates[0][1]['tags'] == [3]
@@ -66,7 +88,7 @@ class TestProcessMovieTagsScore:
                                                         base_config):
         """A stale score tag is swapped for the new one."""
         movie = make_movie(tags=[2], movie_file_id=10)   # had positive-score
-        api = FakeRadarrAPI(movie_files={10: make_movie_file(score=-7)})
+        api = make_api_for(movie, movie_files={10: make_movie_file(score=-7)})
         assert main.process_movie_tags(
             api, movie, tag_map, 100, base_config) is True
         assert api.updates[0][1]['tags'] == [1]
@@ -77,7 +99,7 @@ class TestProcessMovieTagsPreservesUnmanaged:
     def test_unmanaged_tags_are_preserved(self, tag_map, base_config):
         """A custom tag ID outside the managed set is kept."""
         movie = make_movie(tags=[99], movie_file_id=10)
-        api = FakeRadarrAPI(movie_files={10: make_movie_file(score=0)})
+        api = make_api_for(movie, movie_files={10: make_movie_file(score=0)})
         assert main.process_movie_tags(
             api, movie, tag_map, 100, base_config) is True
         assert 99 in api.updates[0][1]['tags']
@@ -95,7 +117,7 @@ class TestProcessMovieTagsPreservesUnmanaged:
         movie = make_movie(tags=[full_tag_map['requested'],
                                  full_tag_map['potential-delete']],
                            movie_file_id=10)
-        api = FakeRadarrAPI(movie_files={10: make_movie_file(score=0)})
+        api = make_api_for(movie, movie_files={10: make_movie_file(score=0)})
         assert main.process_movie_tags(
             api, movie, full_tag_map, 100, base_config) is True
         tags = api.updates[0][1]['tags']
@@ -110,7 +132,7 @@ class TestProcessMovieTagsPreservesUnmanaged:
                            tag_4k_enabled=True)
         movie = make_movie(tags=[4, 5, full_tag_map['potential-delete']],
                            movie_file_id=10)
-        api = FakeRadarrAPI(movie_files={10: make_movie_file(score=0)})
+        api = make_api_for(movie, movie_files={10: make_movie_file(score=0)})
         main.process_movie_tags(api, movie, full_tag_map, 100, base_config)
         tags = api.updates[0][1]['tags']
         assert full_tag_map['potential-delete'] in tags
@@ -119,7 +141,7 @@ class TestProcessMovieTagsPreservesUnmanaged:
     def test_multiple_unmanaged_tags_are_preserved(self, tag_map, base_config):
         """Several custom tag IDs are all retained."""
         movie = make_movie(tags=[42, 43], movie_file_id=10)
-        api = FakeRadarrAPI(movie_files={10: make_movie_file(score=0)})
+        api = make_api_for(movie, movie_files={10: make_movie_file(score=0)})
         main.process_movie_tags(api, movie, tag_map, 100, base_config)
         tags = api.updates[0][1]['tags']
         assert 42 in tags and 43 in tags
@@ -127,7 +149,7 @@ class TestProcessMovieTagsPreservesUnmanaged:
     def test_managed_tags_are_stripped_from_movie(self, tag_map, base_config):
         """Pre-existing managed tags are removed before reassignment."""
         movie = make_movie(tags=[1, 2, 5], movie_file_id=10)
-        api = FakeRadarrAPI(movie_files={10: make_movie_file(score=0)})
+        api = make_api_for(movie, movie_files={10: make_movie_file(score=0)})
         main.process_movie_tags(api, movie, tag_map, 100, base_config)
         tags = api.updates[0][1]['tags']
         assert tags == [3]
@@ -142,7 +164,7 @@ class TestProcessMovieTagsCallEfficiency:
         comprehension, producing one HTTP GET per existing tag per movie.
         """
         movie = make_movie(tags=[1, 2, 5], movie_file_id=10)
-        api = FakeRadarrAPI(movie_files={10: make_movie_file(score=0)})
+        api = make_api_for(movie, movie_files={10: make_movie_file(score=0)})
         main.process_movie_tags(api, movie, tag_map, 100, base_config)
         assert api.calls['get_tags'] == 0
 
@@ -154,7 +176,7 @@ class TestProcessMovieTagsCallEfficiency:
         base_config['tag_motong_enabled'] = True
         base_config['tag_4k_enabled'] = True
         movie = make_movie(tags=[], movie_file_id=10)
-        api = FakeRadarrAPI(movie_files={
+        api = make_api_for(movie, movie_files={
             10: make_movie_file(score=50, release_group='motong',
                                 resolution=2160)
         })
@@ -169,7 +191,7 @@ class TestProcessMovieTagsSpecialTags:
         base_config['tag_motong_enabled'] = True
         base_config['tag_4k_enabled'] = True
         movie = make_movie(tags=[], movie_file_id=10)
-        api = FakeRadarrAPI(movie_files={
+        api = make_api_for(movie, movie_files={
             10: make_movie_file(score=0, release_group='motong',
                                 resolution=2160)
         })
@@ -187,7 +209,7 @@ class TestProcessMovieTagsSpecialTags:
         the tag library-wide rather than merely ceasing to add it.
         """
         movie = make_movie(tags=[4, 5, 3], movie_file_id=10)
-        api = FakeRadarrAPI(movie_files={
+        api = make_api_for(movie, movie_files={
             10: make_movie_file(score=0, release_group='motong',
                                 resolution=2160)
         })
@@ -202,7 +224,7 @@ class TestProcessMovieTagsErrorHandling:
                                                        base_config):
         """A failed file lookup degrades to no-score instead of aborting."""
         movie = make_movie(tags=[], movie_file_id=10)
-        api = FakeRadarrAPI(fail_requests_for=['get_movie_file'])
+        api = make_api_for(movie, fail_requests_for=['get_movie_file'])
         assert main.process_movie_tags(
             api, movie, tag_map, 100, base_config) is True
         assert api.updates[0][1]['tags'] == [3]
@@ -210,9 +232,9 @@ class TestProcessMovieTagsErrorHandling:
     def test_update_failure_returns_false(self, tag_map, base_config):
         """A rejected PUT is reported as not-updated."""
         movie = make_movie(tags=[], movie_file_id=10)
-        api = FakeRadarrAPI(
-            movie_files={10: make_movie_file(score=0)},
-            update_result=False)
+        api = make_api_for(movie,
+                           movie_files={10: make_movie_file(score=0)},
+                           update_result=False)
         assert main.process_movie_tags(
             api, movie, tag_map, 100, base_config) is False
         assert api.calls['update_movie'] == 1
@@ -220,9 +242,122 @@ class TestProcessMovieTagsErrorHandling:
     def test_original_movie_dict_is_not_mutated(self, tag_map, base_config):
         """The caller's movie payload is copied, not modified in place."""
         movie = make_movie(tags=[], movie_file_id=10)
-        api = FakeRadarrAPI(movie_files={10: make_movie_file(score=0)})
+        api = make_api_for(movie, movie_files={10: make_movie_file(score=0)})
         main.process_movie_tags(api, movie, tag_map, 100, base_config)
         assert movie['tags'] == []
+
+class TestStaleWriteProtection:
+    """The PUT must be built from a fresh read, not a stale snapshot.
+
+    ``process_movie_tags`` receives a movie captured at the start of a pass that
+    makes one request per movie file. Without re-reading, a tag edit made in the
+    Radarr UI during the pass is silently reverted by the next PUT, because the
+    PUT sends the whole resource (there is no partial-update endpoint:
+    /api/v3/movie/editor returns 404).
+    """
+
+    def test_movie_is_reread_before_update(self, tag_map, base_config):
+        """A write is preceded by a GET of that same movie."""
+        movie = make_movie(tags=[], movie_file_id=10)
+        api = make_api_for(movie, movie_files={10: make_movie_file(score=0)})
+        main.process_movie_tags(api, movie, tag_map, 100, base_config)
+        assert api.calls['get_movie'] == 1
+        assert api.updates[0][0] == movie['id']
+
+    def test_no_reread_when_nothing_changes(self, tag_map, base_config):
+        """A pass with no tag change costs no extra request."""
+        movie = make_movie(tags=[3], movie_file_id=10)
+        api = make_api_for(movie, movie_files={10: make_movie_file(score=0)})
+        assert main.process_movie_tags(
+            api, movie, tag_map, 100, base_config) is False
+        assert api.calls['get_movie'] == 0
+        assert api.calls['update_movie'] == 0
+
+    def test_freshly_read_tags_are_written_not_stale_ones(self, tag_map,
+                                                          base_config):
+        """Tags added to Radarr mid-pass survive the update.
+
+        The library snapshot says tags=[], but the re-read returns tags=[99], as
+        if the user had just tagged the movie. Only the managed tag may be added;
+        the newly added unmanaged tag must not be dropped.
+        """
+        stale = make_movie(tags=[], movie_file_id=10)
+        api = make_api_for(stale, movie_files={10: make_movie_file(score=0)})
+        # Simulate the mid-pass edit: the server now also has tag 99.
+        api.movies = [make_movie(tags=[99], movie_file_id=10)]
+
+        assert main.process_movie_tags(
+            api, stale, tag_map, 100, base_config) is True
+        tags = api.updates[0][1]['tags']
+        assert 99 in tags, 'a tag added during the pass was reverted'
+        assert 3 in tags
+
+    def test_update_skipped_when_reread_fails(self, tag_map, base_config):
+        """If the refresh fails, no PUT is attempted with stale data."""
+        movie = make_movie(tags=[], movie_file_id=10)
+        api = make_api_for(movie,
+                           movie_files={10: make_movie_file(score=0)},
+                           fail_requests_for=['get_movie'])
+        assert main.process_movie_tags(
+            api, movie, tag_map, 100, base_config) is False
+        assert api.calls['get_movie'] == 1
+        assert api.calls['update_movie'] == 0
+
+class TestMergeFreshTags:
+    """Unit coverage for the tag merge used by the stale-write guard."""
+
+    def test_identical_tags_return_computed_list_unchanged(self):
+        """An unchanged snapshot needs no merge work."""
+        assert main._merge_fresh_tags(
+            {'tags': [1]}, {1}, {1}, [3]) == [3]
+
+    def test_new_unmanaged_tag_is_kept(self):
+        """A tag added during the pass survives, ahead of the computed ones."""
+        result = main._merge_fresh_tags(
+            {'tags': [99], 'title': 'M'}, set(), {1}, [3])
+        assert result == [99, 3]
+
+    def test_mostly_unchanged_payload_keeps_computed_order(self):
+        """When nothing moved, the computed order is preserved verbatim."""
+        assert main._merge_fresh_tags(
+            {'tags': [3]}, {3}, {1}, [3]) == [3]
+
+    def test_stale_managed_tag_is_replaced_by_the_new_one(self):
+        """A managed tag from the old snapshot does not leak into the write."""
+        result = main._merge_fresh_tags(
+            {'tags': [2, 99], 'title': 'M'}, {2}, {1, 2}, [1])
+        assert result == [99, 1]
+
+    def test_duplicate_computed_tag_is_not_appended_twice(self):
+        """A tag already present in the fresh read is not duplicated."""
+        result = main._merge_fresh_tags(
+            {'tags': [3, 99], 'title': 'M'}, {3}, {1}, [3])
+        assert result == [99, 3]
+
+    def test_movie_without_tags_key_is_handled(self):
+        """A payload missing 'tags' merges to just the computed tags."""
+        assert main._merge_fresh_tags({}, {1}, {1}, [3]) == [3]
+
+class TestGetMovie:
+    """The single-movie fetch added for the re-read before write."""
+
+    def test_returns_payload_and_sends_auth_header(self):
+        """get_movie hits /movie/{id} through the configured session."""
+        api, session = make_api_client({'get': FakeResponse({'id': 7})})
+        assert api.get_movie(7) == {'id': 7}
+        assert session.calls[0]['url'].endswith('/api/v3/movie/7')
+
+    def test_raises_and_logs_on_request_failure(self):
+        """A transport error propagates so the caller can skip the write."""
+        api, _ = make_api_client({'get': FakeResponse({}, status_code=500)})
+        with pytest.raises(RequestException):
+            api.get_movie(7)
+
+    def test_auth_rejection_raises_authentication_error(self):
+        """401 is surfaced as AuthenticationError, not a bare HTTPError."""
+        api, _ = make_api_client({'get': FakeResponse({}, status_code=401)})
+        with pytest.raises(main.AuthenticationError):
+            api.get_movie(7)
 
 class TestRunOnce:
     """The single-pass orchestration extracted from main()."""
