@@ -146,7 +146,7 @@ environment and recreate the container to recover.
 
 ## Development
 
-Requires Python 3.12+ (the container and CI use 3.12; tests also run on 3.13).
+Requires Python 3.12+ (the container and CI use 3.14; tests also run on 3.12 and 3.13).
 
 ```bash
 python -m venv .venv
