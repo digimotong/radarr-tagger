@@ -2,7 +2,7 @@
 
 radarr-tagger and sonarr-tagger are near-duplicates: same poll loop, same
 config validation, same tag-management rules, same N+1 history. They are
-maintained as separate repositories and auto-deployed independently (WUD), so a
+maintained as separate repositories and auto-deployed independently, so a
 hardening fix applied to one silently misses the other - which is exactly how
 the sibling ended up without the empty-API-key guard.
 
