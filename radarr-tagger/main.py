@@ -176,7 +176,12 @@ def parse_args():
 
 def get_config_from_env():
     """Load configuration from environment variables"""
-    missing = [name for name in REQUIRED_ENV_VARS if not os.getenv(name)]
+    # Fail fast with a message that names the culprits: indexing os.environ
+    # directly raised an unhelpful KeyError traceback for a missing variable, and
+    # a whitespace-only value passed the old check and only failed later as a
+    # 401 "Authentication failed", which sends the user looking at a fine key.
+    missing = [name for name in REQUIRED_ENV_VARS
+               if not os.getenv(name, '').strip()]
     if missing:
         raise ValueError(
             "Missing required environment variables: " + ", ".join(missing))

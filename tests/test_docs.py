@@ -5,7 +5,9 @@ the README is asserted against the code rather than trusted:
 
 * the logged version string must match ``main.VERSION`` (it once said v1.0.0
   while the code shipped 1.0.4);
-* every environment variable the code reads must be documented.
+* every environment variable the code reads must be documented;
+* operational behaviour users depend on (fail-fast, interval bounds, exact-match
+  tagging) must be described as implemented.
 
 The tests deliberately check the *presence* of facts rather than the exact
 wording of prose, so documentation can be rewritten freely.
@@ -20,11 +22,18 @@ import main
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 README_PATH = os.path.join(REPO_ROOT, 'README.md')
+ENV_EXAMPLE_PATH = os.path.join(REPO_ROOT, '.env.example')
 
 @pytest.fixture(scope='module')
 def readme():
     """Return the README contents."""
     with open(README_PATH, encoding='utf-8') as handle:
+        return handle.read()
+
+@pytest.fixture(scope='module')
+def env_example():
+    """Return the sample environment file contents."""
+    with open(ENV_EXAMPLE_PATH, encoding='utf-8') as handle:
         return handle.read()
 
 class TestVersionDocumentation:
@@ -57,11 +66,35 @@ class TestEnvironmentDocumentation:
         assert name in readme
 
     @pytest.mark.parametrize('name', DOCUMENTED_VARS)
-    def test_env_example_documents_variable(self, name):
+    def test_env_example_documents_variable(self, env_example, name):
         """The sample .env covers the same set as the README."""
-        path = os.path.join(os.path.dirname(README_PATH), '.env.example')
-        with open(path, encoding='utf-8') as handle:
-            assert name in handle.read()
+        assert name in env_example
+
+    def test_code_variables_are_all_documented(self, readme, env_example):
+        """No variable read by the code is missing from the docs.
+
+        The explicit list above is a deliberate backstop for renames; this test
+        catches the opposite mistake - a variable added to the code but never
+        documented anywhere a user would look.
+        """
+        source = _read_source()
+        used = set(re.findall(r"os\.getenv\(\s*'([A-Z_]+)'", source))
+        used |= set(re.findall(r"os\.environ\['([A-Z_]+)'\]", source))
+        undocumented = sorted(
+            name for name in used
+            if name not in readme or name not in env_example)
+        assert not undocumented, (
+            f"environment variables used in code but not documented: "
+            f"{undocumented}")
+
+    def test_log_level_levels_documented(self, readme):
+        """Every accepted LOG_LEVEL is listed, CRITICAL included."""
+        for level in main.VALID_LOG_LEVELS:
+            assert level in readme
+
+    def test_readme_documents_fail_fast_behaviour(self, readme):
+        """A broken environment aborts startup instead of retrying forever."""
+        assert 'Configuration error' in readme
 
 class TestOperationalDocumentation:
     """Operational behaviour that users must be told about."""
@@ -71,13 +104,26 @@ class TestOperationalDocumentation:
         assert '--test' in readme
         assert '--version' in readme
 
-    def test_readme_documents_fail_fast_behaviour(self, readme):
-        """A broken environment aborts startup instead of retrying forever."""
-        assert 'Configuration error' in readme
-
     def test_readme_documents_interval_minimum(self, readme):
         """The minimum accepted INTERVAL_MINUTES is stated."""
         assert str(main.MIN_INTERVAL_MINUTES) in readme
+
+    def test_readme_documents_interval_default(self, readme):
+        """The documented default matches the code's default.
+
+        Only the environment-variable table row is matched, e.g.
+        ``| `INTERVAL_MINUTES` | `20` | ... |``: a looser pattern also matches the
+        prose explaining that 0 is rejected, which is not a default.
+        """
+        # The default lives as a literal in main() (os.getenv('INTERVAL_MINUTES',
+        # '20')) rather than as a named constant, so it is pinned here as well;
+        # test_config.py asserts the same value against the real code path.
+        defaults = re.findall(
+            r'\|\s*`INTERVAL_MINUTES`\s*\|\s*`(\d+)`\s*\|', readme)
+        assert defaults, "INTERVAL_MINUTES default is not documented"
+        assert set(defaults) == {'20'}, (
+            f"README documents INTERVAL_MINUTES default(s) {defaults}, "
+            "but get_interval_minutes() defaults to 20")
 
     def test_readme_documents_motong_exact_match(self, readme):
         """The motong rule is documented as exact, matching the code."""
@@ -91,6 +137,27 @@ class TestOperationalDocumentation:
     def test_readme_documents_log_format(self, readme):
         """The log sample uses the format setup_logging actually installs."""
         assert 'INFO - ' in readme
+
+    def test_readme_documents_timeout(self, readme):
+        """The request timeout is user-visible behaviour worth stating."""
+        assert str(main.REQUEST_TIMEOUT) in readme
+
+class TestTimeoutDocumentation:
+    """The timeout constant is documented where operators will look."""
+
+    def test_timeout_value_is_reasonable(self):
+        """A timeout of 0 or hundreds of seconds would defeat its purpose."""
+        assert 1 <= main.REQUEST_TIMEOUT <= 300
+
+    def test_timeout_documented_in_env_example(self, env_example):
+        """Operators reading the env sample learn that calls are bounded."""
+        assert 'timeout' in env_example.lower()
+
+def _read_source():
+    """Return the application source, for cross-checking documentation."""
+    path = os.path.join(REPO_ROOT, 'radarr-tagger', 'main.py')
+    with open(path, encoding='utf-8') as handle:
+        return handle.read()
 
 class TestDependencyPinning:
     """Runtime dependencies must be pinned, for the same reason the base image is.

@@ -126,18 +126,11 @@ python -m venv .venv
 
 ### Twin-divergence check
 
-This repository and `sonarr-tagger` are near-duplicates that deploy
-independently, so a hardening fix applied to one can silently miss the other.
-`tests/test_twin_parity.py` compares the logic that must stay in lockstep and
-**skips** unless both repositories are checked out side by side:
-
-```bash
-# from a directory containing both checkouts
-python -m pytest radarr-tagger/tests/test_twin_parity.py -v
-```
-
-When it fails, port the change to the sibling repository rather than relaxing
-the assertion. CI runs this in a dedicated `parity` job that checks out both.
+`tests/test_twin_parity.py` asserts that this repository and `sonarr-tagger`
+still agree on the logic and docs that must stay in lockstep. It needs both
+checkouts side by side and **skips** otherwise; CI runs it in a dedicated
+`parity` job. When it fails, port the change to the sibling rather than
+relaxing the check.
 
 ## Requirements
 

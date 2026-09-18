@@ -107,10 +107,15 @@ class TestConfigFromEnv:
         assert 'RADARR_URL' in message
         assert 'RADARR_API_KEY' in message
 
-    def test_empty_required_var_raises_valueerror(self, env_guard):
-        """An empty (but present) required value trips the validation guard."""
+    @pytest.mark.parametrize('blank', ['', '   '])
+    def test_empty_required_var_raises_valueerror(self, env_guard, blank):
+        """A blank (but present) required value trips the validation guard.
+
+        Whitespace counts as blank: a padded value is as useless as an unset one,
+        and letting it through means a 401 later that reads like a wrong key.
+        """
         env_guard({
-            'RADARR_URL': '',
+            'RADARR_URL': blank,
             'RADARR_API_KEY': 'abc123',
         })
         with pytest.raises(ValueError, match='Missing required environment'):
