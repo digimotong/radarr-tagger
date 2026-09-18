@@ -36,6 +36,20 @@ MAX_INTERVAL_MINUTES = 525_600  # one year
 # Log levels accepted in LOG_LEVEL, as a case-insensitive lookup.
 VALID_LOG_LEVELS = ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
 
+def _raise_on_auth_failure(response):
+    """Raise ``AuthenticationError`` when Radarr rejects the API key.
+
+    Must run *before* ``response.raise_for_status()``: 401 and 403 are otherwise
+    flattened into a generic ``HTTPError`` and retried forever by the poll loop.
+    This was a real, silent failure mode - three stale processes with an empty
+    API key sat in the retry loop for a day, emitting a 401 every five minutes
+    while never tagging anything, and the container reported nothing wrong.
+    """
+    if getattr(response, 'status_code', None) in (401, 403):
+        raise AuthenticationError(
+            f"Radarr rejected the API key (HTTP {response.status_code}). "
+            "Check RADARR_API_KEY; retrying cannot fix this.")
+
 class RadarrAPI:
     """Client for Radarr API interactions"""
 
@@ -78,6 +92,7 @@ class RadarrAPI:
             response = self.session.post(endpoint, json={
                 'label': label
             }, timeout=REQUEST_TIMEOUT)
+            _raise_on_auth_failure(response)
             response.raise_for_status()
             return response.json()
         except RequestException as e:
@@ -89,6 +104,7 @@ class RadarrAPI:
         endpoint = f"{self.base_url}/api/v3/moviefile/{movie_file_id}"
         try:
             response = self.session.get(endpoint, timeout=REQUEST_TIMEOUT)
+            _raise_on_auth_failure(response)
             response.raise_for_status()
             return response.json()
         except RequestException as e:
@@ -101,6 +117,7 @@ class RadarrAPI:
         try:
             response = self.session.put(endpoint, json=movie_data,
                                         timeout=REQUEST_TIMEOUT)
+            _raise_on_auth_failure(response)
             response.raise_for_status()
             return True
         except RequestException as e:
@@ -110,6 +127,20 @@ class RadarrAPI:
                 response.text if 'response' in locals() else '',
                 str(e))
             return False
+
+class AuthenticationError(RequestException):
+    """Raised when Radarr rejects the API key (HTTP 401 or 403).
+
+    A wrong key is not a transient fault, so it must not be retried: the poll
+    loop would otherwise log one line every five minutes forever while never
+    tagging anything. Treated as fatal so the container exits and its restart
+    policy surfaces the misconfiguration. See ``main()``.
+
+    Subclasses ``RequestException`` because an HTTP failure *is* a request
+    failure: every caller already catches that, so the thousands of request
+    paths keep treating 401 as a failure while ``main()`` can still single this
+    case out to stop retrying.
+    """
 
 def parse_args():
     """Parse command line arguments"""
@@ -346,6 +377,12 @@ def main():
             run_once(api, config, test_mode=args.test)
             logging.info("Next run in %s minutes", interval_minutes)
             time.sleep(interval_minutes * 60)
+
+        except AuthenticationError as e:
+            # Fatal: a rejected key never becomes valid by waiting, and retrying
+            # hides the problem behind one log line per 5 minutes forever.
+            logging.error("Authentication failed: %s", str(e))
+            sys.exit(1)
 
         except (RequestException, ValueError) as e:
             logging.error("Script failed: %s", str(e))

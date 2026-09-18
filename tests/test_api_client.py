@@ -98,7 +98,6 @@ class TestGetTags:
         api, _ = make_api({'get': FakeResponse({}, status_code=401)})
         with pytest.raises(RequestException):
             api.get_tags()
-
 class TestCreateTag:
     """POST /api/v3/tag."""
 
