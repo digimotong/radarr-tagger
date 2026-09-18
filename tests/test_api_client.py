@@ -98,7 +98,6 @@ class TestGetTags:
         api, _ = make_api({'get': FakeResponse({}, status_code=401)})
         with pytest.raises(RequestException):
             api.get_tags()
-
 class TestCreateTag:
     """POST /api/v3/tag."""
 
@@ -216,4 +215,55 @@ class TestTimeouts:
         """The configured timeout must be a usable, positive value."""
         assert isinstance(main.REQUEST_TIMEOUT, (int, float))
         assert main.REQUEST_TIMEOUT > 0
+
+class TestAuthenticationRejection:
+    """401/403 become AuthenticationError so the loop can stop retrying.
+
+    Retrying a rejected key can never succeed. Before this the generic
+    HTTPError was swallowed by the retry branch and the process logged one line
+    every five minutes forever - the exact silent failure seen in production,
+    where three stale processes with an empty key emitted 401s for a day.
+    """
+
+    @pytest.mark.parametrize('status_code', [401, 403])
+    @pytest.mark.parametrize('method_name,args', [
+        ('get_movies', ()),
+        ('get_movie', (1,)),
+        ('get_tags', ()),
+        ('get_movie_file', (1,)),
+    ])
+    def test_get_rejections_raise_authentication_error(self, status_code,
+                                                       method_name, args):
+        """Every GET surfaces an auth rejection as AuthenticationError."""
+        api, _ = make_api(
+            {'get': FakeResponse({}, status_code=status_code)})
+        with pytest.raises(main.AuthenticationError):
+            getattr(api, method_name)(*args)
+
+    @pytest.mark.parametrize('status_code', [401, 403])
+    def test_update_movie_rejection_is_logged_and_returns_false(self,
+                                                               status_code,
+                                                               caplog):
+        """A PUT rejection does not raise: update_movie reports failure.
+
+        The existing contract is a boolean, and process_movie_tags relies on it.
+        AuthenticationError still subclasses RequestException, so it is caught
+        by the same handler.
+        """
+        api, _ = make_api({'put': FakeResponse({}, status_code=status_code)})
+        assert api.update_movie(1, {}) is False
+        assert 'Failed to update movie 1' in caplog.text
+
+    def test_create_tag_auth_rejection_propagates(self):
+        """A tag-creation rejection reaches the loop as AuthenticationError."""
+        api, _ = make_api({'post': FakeResponse({}, status_code=401)})
+        with pytest.raises(main.AuthenticationError):
+            api.create_tag('motong')
+
+    def test_authentication_error_is_not_raised_for_other_4xx(self):
+        """A plain 404 stays a generic HTTPError, not an auth failure."""
+        api, _ = make_api({'get': FakeResponse([], status_code=404)})
+        with pytest.raises(HTTPError) as excinfo:
+            api.get_movies()
+        assert not isinstance(excinfo.value, main.AuthenticationError)
 

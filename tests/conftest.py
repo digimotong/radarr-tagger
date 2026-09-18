@@ -106,6 +106,7 @@ class FakeRadarrAPI:
         self.fail_requests_for = set(fail_requests_for)
         self.calls = {
             'get_movies': 0,
+            'get_movie': 0,
             'get_tags': 0,
             'create_tag': 0,
             'get_movie_file': 0,
@@ -124,6 +125,21 @@ class FakeRadarrAPI:
         self.calls['get_movies'] += 1
         self._maybe_fail('get_movies')
         return self.movies
+
+    def get_movie(self, movie_id):
+        """Return a *copy* of one configured movie.
+
+        The copy matters: production code re-reads the movie immediately before
+        PUT so that it writes fresh server state rather than the stale snapshot
+        captured at the start of the pass. Returning the same object here would
+        let a stale-snapshot bug pass unnoticed.
+        """
+        self.calls['get_movie'] += 1
+        self._maybe_fail('get_movie')
+        for movie in self.movies:
+            if movie['id'] == movie_id:
+                return dict(movie)
+        raise AssertionError(f"unexpected movie id {movie_id}")
 
     def get_tags(self):
         """Return the configured tag list."""

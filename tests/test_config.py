@@ -107,10 +107,15 @@ class TestConfigFromEnv:
         assert 'RADARR_URL' in message
         assert 'RADARR_API_KEY' in message
 
-    def test_empty_required_var_raises_valueerror(self, env_guard):
-        """An empty (but present) required value trips the validation guard."""
+    @pytest.mark.parametrize('blank', ['', '   '])
+    def test_empty_required_var_raises_valueerror(self, env_guard, blank):
+        """A blank (but present) required value trips the validation guard.
+
+        Whitespace counts as blank: a padded value is as useless as an unset one,
+        and letting it through means a 401 later that reads like a wrong key.
+        """
         env_guard({
-            'RADARR_URL': '',
+            'RADARR_URL': blank,
             'RADARR_API_KEY': 'abc123',
         })
         with pytest.raises(ValueError, match='Missing required environment'):
@@ -562,4 +567,43 @@ class TestMainLoop:
             main.main()
 
         assert slept == [300]
+
+    def test_authentication_error_is_fatal_and_not_retried(
+            self, monkeypatch, env_guard, base_config):
+        """A rejected API key exits 1 instead of retrying forever.
+
+        Retrying cannot repair a wrong key. Before this, the loop logged one line
+        every five minutes indefinitely while tagging nothing - three processes
+        with an empty key did exactly that for a day, and the only symptom was
+        unrelated 401 noise in the Radarr log. The container must die so its
+        restart policy shows the failure.
+        """
+        monkeypatch.setattr('sys.argv', ['main.py'])
+        env_guard({
+            'RADARR_URL': base_config['radarr_url'],
+            'RADARR_API_KEY': 'wrong-key',
+        })
+        monkeypatch.setattr(main, 'get_config_from_env', lambda: dict(base_config))
+        monkeypatch.setattr(main, 'RadarrAPI', lambda *a, **kw: None)
+
+        def reject(*args, **kwargs):
+            raise main.AuthenticationError('Radarr rejected the API key (HTTP 401)')
+
+        monkeypatch.setattr(main, 'run_once', reject)
+        slept = []
+        self._stop_after_first_sleep(monkeypatch, slept)
+
+        with pytest.raises(SystemExit) as excinfo:
+            main.main()
+
+        assert excinfo.value.code == 1
+        assert slept == [], 'a rejected key must not be retried after 5 minutes'
+
+    def test_authentication_error_is_a_request_exception(self):
+        """AuthenticationError stays catchable as a RequestException.
+
+        Every call site already catches RequestException, so subclassing it keeps
+        all existing failure handling intact while main() singles this case out.
+        """
+        assert issubclass(main.AuthenticationError, RequestException)
 
