@@ -186,7 +186,7 @@ def get_score_tag(score: int, threshold: int) -> str:
         return "positive-score"
     return "no-score"
 
-VERSION = "1.0.6"
+VERSION = "1.0.7"
 
 def process_movie_tags(
         api: RadarrAPI,
@@ -200,9 +200,21 @@ def process_movie_tags(
 
     # Remove any existing managed tags (by ID). The label->id mapping is already
     # available in ``tag_map``, so no additional get_tags() request is needed.
-    managed_tag_ids = set(tag_map.values())
+    #
+    # The strip set must be derived from MANAGED_TAGS, never from every value in
+    # ``tag_map``: ensure_required_tags() maps *all* tags that exist in Radarr
+    # (not just the managed ones), so ``set(tag_map.values())`` treated unrelated
+    # tags - 'requested', 'potential-delete', auto-tagging tags - as managed and
+    # erased them from every movie on every pass. Only the tags this tool owns may
+    # be stripped.
+    managed_tag_ids = {tag_map[label] for label in MANAGED_TAGS
+                       if label in tag_map}
     new_tag_ids = [tag_id for tag_id in current_tags
                    if tag_id not in managed_tag_ids]
+    preserved_tag_ids = sorted(current_tags - managed_tag_ids)
+    if preserved_tag_ids:
+        logging.debug("Keeping unmanaged tags %s for %s",
+                      preserved_tag_ids, movie['title'])
 
     # Get movie file and score
     score = None
@@ -260,7 +272,13 @@ def add_special_tags(
     return tag_ids
 
 def ensure_required_tags(api: RadarrAPI) -> Dict:
-    """Ensure required tags exist and return tag name to ID mapping"""
+    """Ensure required tags exist and return a label -> ID mapping.
+
+    NOTE: the returned map covers *every* tag known to Radarr, including tags
+    this tool does not manage. Callers deciding which tags may be stripped must
+    filter on MANAGED_TAGS - iterating over the whole map would treat unrelated
+    tags as managed.
+    """
     all_tags = api.get_tags()
     tag_map = {tag['label']: tag['id'] for tag in all_tags}
 

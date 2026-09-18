@@ -187,6 +187,18 @@ def tag_map():
     return dict(DEFAULT_TAG_MAP)
 
 @pytest.fixture
+def full_tag_map():
+    """A label->id map shaped like ``ensure_required_tags()`` really returns.
+
+    ``ensure_required_tags()`` maps *every* tag that exists in Radarr, not only
+    the managed ones, so a realistic map must contain unmanaged entries. Do not
+    "simplify" this back to DEFAULT_TAG_MAP: tests built on a managed-only map
+    cannot detect unmanaged tags being stripped (that gap is exactly how the
+    tag-wiping bug shipped).
+    """
+    return {**DEFAULT_TAG_MAP, 'requested': 98, 'potential-delete': 99}
+
+@pytest.fixture
 def base_config():
     """Return a config dict with both optional tag features disabled."""
     return {
