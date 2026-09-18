@@ -240,7 +240,7 @@ def get_score_tag(score: int, threshold: int) -> str:
         return "positive-score"
     return "no-score"
 
-VERSION = "1.0.7"
+VERSION = "1.0.8"
 
 def _merge_fresh_tags(
         fresh_movie: Dict,

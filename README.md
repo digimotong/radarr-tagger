@@ -80,7 +80,7 @@ docker logs radarr-tagger
 
 Example log output (with `LOG_LEVEL: DEBUG`):
 ```
-2025-04-27 12:00:00,000 - INFO - Starting Radarr Tag Updater v1.0.7
+2025-04-27 12:00:00,000 - INFO - Starting Radarr Tag Updater v1.0.8
 2025-04-27 12:00:02,300 - INFO - Creating missing tag: 4k
 2025-04-27 12:00:05,400 - DEBUG - Movie: Inception - Score: 150 - Tag: positive-score
 2025-04-27 12:00:10,500 - INFO - Processing complete. Updated 18/125 movies
