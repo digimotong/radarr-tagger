@@ -9,8 +9,8 @@ from conftest import FakeRadarrAPI, FakeResponse, FakeSession, make_movie, make_
 def make_api_client(responses=None):
     """Build a real ``main.RadarrAPI`` wired to a ``FakeSession``.
 
-    Used where the test needs the actual HTTP client code paths (URL building,
-    status-code handling) rather than the ``FakeRadarrAPI`` behaviour double.
+    Used where the test needs the actual HTTP client code paths rather than the
+    ``FakeRadarrAPI`` behaviour double.
     """
     session = FakeSession(responses)
     return main.RadarrAPI('http://radarr:7878', 'test-key', session=session), session
@@ -19,12 +19,9 @@ def make_api_for(movie, **kwargs):
     """Build a ``FakeRadarrAPI`` that can serve ``movie`` back from both the
     library list and the single-movie endpoint.
 
-    ``process_movie_tags`` re-reads a movie immediately before writing (so the
-    PUT is based on current server state, not a snapshot taken at the start of a
-    pass), which means a movie must exist in ``api.movies`` for a write to
-    happen at all. Registering it here keeps each test focused on tag logic
-    instead of repeating that setup. ``movie`` is copied so the fixture object
-    the test still holds is never the one the code under test mutates.
+    A movie must exist in ``api.movies`` for a write to happen at all, since
+    ``process_movie_tags`` re-reads before writing. ``movie`` is copied so the
+    test's own object is never mutated.
     """
     return FakeRadarrAPI(movies=[dict(movie)], **kwargs)
 
@@ -109,10 +106,9 @@ class TestProcessMovieTagsPreservesUnmanaged:
                                                       base_config):
         """A realistic tag map must not cause unrelated tags to be erased.
 
-        ``ensure_required_tags()`` returns a map of *every* tag in Radarr, so the
-        managed set must be derived from MANAGED_TAGS. Deriving it from the map's
-        values instead silently stripped tags such as 'requested' and
-        'potential-delete' from every movie on every pass.
+        ``ensure_required_tags()`` maps *every* Radarr tag, so the managed set
+        must come from MANAGED_TAGS; using the map's values stripped unrelated
+        tags from every movie on every pass.
         """
         movie = make_movie(tags=[full_tag_map['requested'],
                                  full_tag_map['potential-delete']],
@@ -249,11 +245,8 @@ class TestProcessMovieTagsErrorHandling:
 class TestStaleWriteProtection:
     """The PUT must be built from a fresh read, not a stale snapshot.
 
-    ``process_movie_tags`` receives a movie captured at the start of a pass that
-    makes one request per movie file. Without re-reading, a tag edit made in the
-    Radarr UI during the pass is silently reverted by the next PUT, because the
-    PUT sends the whole resource (there is no partial-update endpoint:
-    /api/v3/movie/editor returns 404).
+    Without re-reading, a tag edit made during the pass is reverted by the next
+    PUT, which sends the whole resource.
     """
 
     def test_movie_is_reread_before_update(self, tag_map, base_config):

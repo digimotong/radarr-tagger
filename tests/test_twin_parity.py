@@ -1,27 +1,13 @@
 """Divergence guard for the two sibling containers.
 
-radarr-tagger and sonarr-tagger are near-duplicates: same poll loop, same
-config validation, same tag-management rules, same N+1 history. They are
-maintained as separate repositories and auto-deployed independently, so a
-hardening fix applied to one silently misses the other - which is exactly how
-the sibling ended up without the empty-API-key guard.
+radarr-tagger and sonarr-tagger are near-duplicates maintained as separate,
+independently deployed repositories, so a hardening fix applied to one silently
+misses the other. This test compares the normalised source text of the logic that
+must agree, while allowing the legitimately different parts (product name and
+URL environment variables), and also compares the documentation scaffolding
+(``test_docs.py`` guard names, ``.env.example`` notes, README headings).
 
-A full shared-library refactor was considered and rejected: it would couple two
-independently deployed images, so a bad release of one would break the other.
-This test is the cheaper substitute. It asserts that the *logic* which must
-agree really does agree, by comparing normalised source text, while explicitly
-allowing the parts that are legitimately different (the product name and URL
-environment variables).
-
-It also compares the *documentation scaffolding* - the guard names in
-``tests/test_docs.py``, the notes in ``.env.example`` and the README headings -
-because that is where the drift actually happened: this repository's env sample
-lost a timeout note and its doc-test file fell six guards behind the sibling's,
-and a source-only comparison could not see either.
-
-If this fails, the fix is to port the change to the sibling - not to relax the
-assertion. The expected shape of each twin is pinned below so that a silent
-rewrite of one side is caught rather than rubber-stamped.
+If it fails, port the change to the sibling - do not relax the assertion.
 """
 
 import os
@@ -39,16 +25,10 @@ SIBLING_DOC_TESTS_PATH = os.path.join(SIBLING_ROOT, 'tests', 'test_docs.py')
 SIBLING_ENV_EXAMPLE_PATH = os.path.join(SIBLING_ROOT, '.env.example')
 SIBLING_README_PATH = os.path.join(SIBLING_ROOT, 'README.md')
 
-# This module lives in the radarr repo; the sibling only exists in a combined
-# checkout (the local /data/repos layout). Skip rather than fail when CI checks
-# out a single repository.
-#
-# In CI the sibling is always provisioned by the `parity` job, so a missing
-# sibling there means the checkout silently did not happen - and because pytest
-# exits 0 on a skip, that would report the job green while it asserted nothing.
-# A required status check that can pass without testing anything is worse than
-# no check at all, so enforce the sibling when CI asks for it (the parity job
-# sets PARITY_REQUIRE_SIBLING=1) and keep the quiet skip only for local runs.
+# The sibling only exists in a combined checkout, so skip when CI checks out a
+# single repository. The parity job sets PARITY_REQUIRE_SIBLING=1 to turn that
+# skip into a failure: pytest exits 0 on a skip, so a botched checkout would
+# otherwise report the required check green having asserted nothing.
 SIBLING_MISSING = not os.path.exists(SIBLING_PATH)
 REQUIRE_SIBLING = os.environ.get('PARITY_REQUIRE_SIBLING') == '1'
 
@@ -81,10 +61,9 @@ def own_source():
 def _normalise(source):
     """Strip the legitimately-different parts and the noise of formatting.
 
-    Product names, the noun for the managed resource (movie/show), the name of
-    the managed-tag constant and the version string are expected to differ;
-    comments and blank lines are not part of the behaviour being compared.
-    Everything else must match character for character after this.
+    Product names, the resource noun, the managed-tag constant and the version
+    string are expected to differ; comments, docstrings and blank lines are not
+    part of the behaviour compared. Everything else must match exactly.
     """
     text = source.replace('Radarr', 'PRODUCT').replace('radarr', 'product')
     text = text.replace('Sonarr', 'PRODUCT').replace('sonarr', 'product')
@@ -95,12 +74,9 @@ def _normalise(source):
     text = text.replace('MANAGED_TAGS', 'RESOURCE_TAGS')
     text = text.replace('REQUIRED_TAGS', 'RESOURCE_TAGS')
     text = re.sub(r'VERSION = "[^"]*"', 'VERSION = "X"', text)
-    # Each product names its own API-key variable in the message.
     text = re.sub(r'\b[A-Z]+_API_KEY\b', 'PRODUCT_API_KEY', text)
-    # Parameter names echo the resource noun (fresh_movie/fresh_show).
     text = re.sub(r'\bfresh_(?:movie|show)\b', 'fresh_resource', text)
-    # Docstrings explain the same rule in each product's own vocabulary; the
-    # executable code below them is what must stay in lockstep.
+    # Docstrings differ by product's vocabulary; only the code must match.
     text = re.sub(r'""".*?"""', '"""..."""', text, flags=re.DOTALL)
     text = re.sub(r"'''.*?'''", "'''...'''", text, flags=re.DOTALL)
     text = re.sub(r'#.*', '', text)              # drop comments
@@ -111,10 +87,9 @@ def _normalise(source):
 def _normalise_comment(line):
     """Normalise a documentation comment line for twin comparison.
 
-    ``_normalise`` is built for code: it drops comments and all whitespace, so
-    every comment line collapses to the empty string and comparing them would
-    always pass. This keeps the words, folds case and runs of spaces, and
-    substitutes the product names so only genuine differences remain.
+    ``_normalise`` drops comments entirely, so comparing them with it would
+    always pass. This keeps the words, folds case and whitespace, and substitutes
+    the product names so only genuine differences remain.
     """
     text = line.lstrip('#').strip()
     for product in ('Radarr', 'radarr', 'Sonarr', 'sonarr'):
@@ -127,11 +102,8 @@ def _normalise_comment(line):
 def _extract(source, name):
     """Return the source of a top-level ``def name`` or ``class name`` block.
 
-    The block ends at the next line that starts in column 0 - either another
-    top-level statement or the end of file. Matching on the next ``def``/``class``
-    alone would swallow trailing module-level assignments (the sibling has
-    ``VERSION`` right after ``get_score_tag``), which is unrelated to the
-    function body being compared.
+    The block ends at the next column-0 line, so trailing module-level
+    assignments are not swallowed into the comparison.
     """
     pattern = re.compile(
         rf'^(?:def|class) {re.escape(name)}\b.*?(?=^\S|\Z)',
@@ -170,9 +142,7 @@ class TestSharedLogicIsIdentical:
 class TestRetryPolicyHasNotSilentlyChanged:
     """Pin the values the parity check compares, so a twin rewrite is visible.
 
-    Without this, someone could "fix" a divergence by changing both sides to
-    something equally wrong (for example dropping the fatal auth branch) and the
-    parity assertions above would still pass.
+    Otherwise a divergence could be "fixed" by making both sides equally wrong.
     """
 
     def test_auth_failure_exits_instead_of_retrying(self, own_source,
@@ -217,11 +187,8 @@ class TestProductSpecificExpectations:
 class TestDocumentationScaffoldingMatches:
     """The docs and their guards are twins too, and must be kept in lockstep.
 
-    Comparing ``main.py`` alone missed real drift: this env sample had lost a
-    timeout note the sibling keeps, and this ``test_docs.py`` was six guards
-    behind the sibling's. Structure is compared rather than prose (a heading, a
-    variable name, a test name), and nothing here asserts wording, so both files
-    stay free to be rewritten.
+    Structure is compared rather than prose (a heading, a variable name, a test
+    name), so both files stay free to be rewritten.
     """
 
     def _read(self, path):
@@ -252,8 +219,7 @@ class TestDocumentationScaffoldingMatches:
     def test_env_example_notes_match(self):
         """The two sample env files explain the same things.
 
-        Comment lines only: the values themselves differ by product, which is
-        exactly why the product name is normalised away before comparing.
+        Comment lines only: the values differ by product, hence the normalising.
         """
         def notes(text):
             return sorted(
@@ -285,25 +251,12 @@ class TestDocumentationScaffoldingMatches:
 class TestWorkflowKeepsTheParityCheckUsable:
     """The workflow is what makes this file a *check* rather than a unit test.
 
-    The ruleset on ``main`` requires six status checks - ``lint``,
-    ``dockerfile``, ``parity``, and the three expanded ``test (3.12)``/``(3.13)``
-    /``(3.14)`` contexts - which turns six harmless-looking details of
-    ``.github/workflows/tests.yml`` into load bearing invariants. None of them is
-    visible to the tests above: they can all break while ``pytest`` stays green
-    locally, and the damage is a merge-gated repository rather than a red build.
-
-    Because that list is longer than the sibling's guard originally covered,
-    every required context is asserted here rather than only the two the
-    repositories share: ``dockerfile`` was required but unpinned, and the matrix
-    that produces the three ``test`` contexts was not pinned either - dropping a
-    version would have stopped a required check reporting with nothing to catch
-    it. flac-health-reencode asserts the mirror-image rule (a matrix on ITS
-    required jobs is the failure), so the two guards are deliberately not copies
-    of each other; each matches its own ruleset.
-
-    ``main.py`` gets normalised twin comparison; this file does not, so what is
-    asserted here is the structure the check depends on, not wording. If one of
-    these fails, fix the workflow - relaxing the assertion restores the trap.
+    The ruleset on ``main`` requires six status checks (``lint``, ``dockerfile``,
+    ``parity`` and three ``test (3.x)`` contexts), which makes details of
+    ``tests.yml`` load bearing: they can all break while ``pytest`` stays green,
+    and the damage is a merge-gated repository rather than a red build. Only the
+    structure the check depends on is asserted, so fix the workflow rather than
+    relaxing an assertion.
     """
 
     def _workflow(self):
@@ -315,13 +268,9 @@ class TestWorkflowKeepsTheParityCheckUsable:
     def _workflow_document(self):
         """Return this repository's tests workflow, parsed as YAML.
 
-        Two of the invariants below cannot be asserted from text at all. This
-        workflow's own comment block names ``paths:`` and ``branches:`` while
-        explaining why filters must not be used, so ``'paths:' in text`` is True
-        in a file that has no filters; and a rule matching the ``parity`` line
-        still matches a job that has grown a ``strategy:`` block, even though
-        that renames the required check. Parsing separates the structure from
-        the prose that describes it.
+        Some invariants cannot be read from text: a comment naming ``paths:``
+        would match ``'paths:' in text``, and a ``strategy:`` block still matches
+        a rule aimed at the ``parity`` line even though it renames the check.
         """
         with open(os.path.join(REPO_ROOT, '.github', 'workflows',
                                'tests.yml'), encoding='utf-8') as handle:
@@ -330,9 +279,8 @@ class TestWorkflowKeepsTheParityCheckUsable:
     def _triggers(self):
         """Return the workflow's trigger mapping.
 
-        PyYAML implements YAML 1.1, where a bare ``on:`` key parses as the
-        boolean ``True`` rather than the string ``'on'``, so both spellings are
-        accepted instead of letting a quoted key turn this into a KeyError.
+        PyYAML is YAML 1.1, so a bare ``on:`` key parses as boolean ``True``;
+        both spellings are accepted here.
         """
         document = self._workflow_document()
         triggers = document.get('on', document.get(True))
@@ -346,11 +294,9 @@ class TestWorkflowKeepsTheParityCheckUsable:
     def test_triggers_are_unfiltered(self):
         """The workflow must start on every push and PR, with no filters.
 
-        A ``paths:`` or ``branches:`` filter skips the whole run - ``parity``
-        included - on exactly the PRs that touch those files. A required check
-        that is skipped rather than failed reports as *Expected*, so the PR is
-        blocked with no red X to explain it. Substring matching cannot detect
-        these keys here: the comment block above ``jobs:`` names both of them.
+        A ``paths:``/``branches:`` filter skips the whole run - ``parity``
+        included - on exactly the PRs that touch those files, and a skipped
+        required check reports nothing instead of failing visibly.
         """
         triggers = self._triggers()
         assert sorted(triggers) == ['pull_request', 'push'], (
@@ -367,18 +313,8 @@ class TestWorkflowKeepsTheParityCheckUsable:
     def test_required_jobs_are_declared_but_not_matrixed(self):
         """The required jobs must exist, un-matrixed and un-renamed.
 
-        The text assertion this replaces could not see it: a job that has grown
-        a ``strategy:`` block still matches its own job line, yet the reported
-        context becomes ``parity (3.12)`` and the required ``parity`` check stops
-        reporting. The workflow's own comment about the ``lint`` job documents
-        the same trap.
-
-        Every context the ruleset requires is listed, not just the two the
-        sibling happens to share: ``dockerfile`` is required too, so an earlier
-        version of this test left it unpinned and a rename or matrix of that job
-        would have blocked every PR with nothing here to catch it. The name also
-        has to be the bare one - a job-level ``name:`` replaces the reported
-        context just as a matrix renames it.
+        A ``strategy:`` block or a job-level ``name:`` changes the reported
+        context, which stops the required check reporting.
         """
         jobs = self._workflow_document().get('jobs') or {}
         for name in ('parity', 'lint', 'dockerfile'):
@@ -399,13 +335,9 @@ class TestWorkflowKeepsTheParityCheckUsable:
     def test_required_jobs_cannot_be_skipped(self):
         """A job that does not run reports nothing, so `if:`/`needs:` are traps.
 
-        A matrix renames the check and a `name:` replaces it; these two stop it
-        from being reported at all, which is the same silent block by another
-        route. An `if:` that only holds on push (``github.event_name == 'push'``)
-        leaves every pull request without the check, and a ``needs:`` chain
-        inherits the skip: one guarded job upstream takes the required check down
-        with it. Neither is visible to the tests above, and both leave the
-        repository merge-gated rather than failing visibly.
+        An `if:` that only holds on push leaves every PR without the check, and a
+        ``needs:`` chain inherits the skip - both leave the repository
+        merge-gated rather than failing visibly.
         """
         jobs = self._workflow_document().get('jobs') or {}
         for name in ('parity', 'lint', 'dockerfile'):
@@ -421,17 +353,9 @@ class TestWorkflowKeepsTheParityCheckUsable:
     def test_the_matrixed_job_keeps_every_required_python_version(self):
         """The required contexts here are `test (3.12)`, `(3.13)` and `(3.14)`.
 
-        This is the inverse of the assertion above and of its counterpart in the
-        flac repo, where a matrix on a required job is the failure and here its
-        *absence* is: the ruleset requires three expanded contexts, so dropping a
-        version (or removing the matrix) stops that context reporting and blocks
-        every PR - while the workflow still looks like it is testing Python.
-        Pinning the exact list means the ruleset can only be narrowed by changing
-        both sides deliberately, in one commit.
-
-        Only the version list is pinned. The matrix may still grow other keys
-        (an ``os:`` axis, an ``include:``), because this asserts the required
-        contexts are all still produced, not that the matrix is frozen.
+        The ruleset needs all three, so dropping a version (or the whole matrix)
+        stops that context reporting while the workflow still looks like it
+        tests Python. Only the version list is pinned, not the whole matrix.
         """
         jobs = self._workflow_document().get('jobs') or {}
         test_job = jobs.get('test') or {}
@@ -446,10 +370,9 @@ class TestWorkflowKeepsTheParityCheckUsable:
     def test_sibling_ref_is_probed_before_it_is_used(self):
         """The sibling ref must be resolved by probing, never assumed.
 
-        Dependabot names its branches per repository, so a weekly bump PR here
-        has no counterpart on the sibling. The probe falls back to the
-        sibling's default branch in that case; feeding the unprobed branch
-        straight to `ref` would fail the sibling checkout instead.
+        Bot-created branches have no counterpart on the sibling, where the probe
+        falls back to its default branch; an unprobed ref would fail the
+        checkout instead.
         """
         workflow = self._workflow()
         assert 'git ls-remote --exit-code --heads' in workflow, (
@@ -464,9 +387,8 @@ class TestWorkflowKeepsTheParityCheckUsable:
     def test_missing_sibling_fails_instead_of_skipping(self):
         """The vacuous-pass guard must survive.
 
-        pytest exits 0 on a skip, so a botched sibling checkout would report
-        this job green having asserted nothing - the worst possible outcome for
-        a required check.
+        pytest exits 0 on a skip, so a botched sibling checkout would report this
+        required job green having asserted nothing.
         """
         assert "PARITY_REQUIRE_SIBLING: '1'" in self._workflow(), (
             "the parity job no longer sets PARITY_REQUIRE_SIBLING=1, so a "

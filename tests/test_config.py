@@ -157,10 +157,9 @@ class TestGetLogLevel:
     def test_advertised_levels_match_logging_and_stay_unique(self):
         """VALID_LOG_LEVELS must be usable by logging and free of aliases.
 
-        logging.getLevelNamesMapping() also contains the aliases WARN and FATAL.
-        Advertising those would be wrong: the error message lists VALID_LOG_LEVELS
-        as the accepted set, and DEBUG/FATAL would then normalise to two spellings
-        of the same level. Guard against both kinds of drift here.
+        logging.getLevelNamesMapping() also contains the aliases WARN and FATAL,
+        which are deliberately not advertised: DEBUG/FATAL would normalise to two
+        spellings of one level.
         """
         accepted = main.VALID_LOG_LEVELS
         assert accepted == tuple(sorted(set(accepted), key=accepted.index))
@@ -174,8 +173,8 @@ class TestGetLogLevel:
     def test_rejects_logging_aliases_with_actionable_message(self):
         """WARN/FATAL are rejected, but the message must reveal the canonical name.
 
-        An operator who has LOG_LEVEL=WARN needs to be told the value is invalid
-        *and* which spelling to use, otherwise the fix is guesswork.
+        An operator with LOG_LEVEL=WARN needs both the rejection and the correct
+        spelling, or the fix is guesswork.
         """
         for alias, canonical in (('WARN', 'WARNING'), ('FATAL', 'CRITICAL')):
             with pytest.raises(ValueError) as excinfo:

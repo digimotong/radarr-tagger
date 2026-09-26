@@ -13,37 +13,27 @@ from typing import Dict, List, Set
 import requests
 from requests.exceptions import RequestException
 
-# Single source of truth for the tags this tool manages (creates and assigns).
-# Any tag in this list is stripped from every movie before the current desired
-# state is applied, and created on demand when missing from Radarr.
-# NOTE: 'motong' and '4k' are only re-applied when TAG_MOTONG / TAG_4K are
-# enabled, so disabling either flag also removes that tag from all movies.
+# Tags this tool owns: stripped from every movie, then re-applied by policy.
+# motong/4k count as owned only while TAG_MOTONG / TAG_4K are enabled.
 MANAGED_TAGS = ['negative-score', 'positive-score', 'no-score', 'motong', '4k']
 
-# HTTP calls block indefinitely when no timeout is supplied, which would leave the
-# long-running update loop wedged forever on a half-open connection.
+# Without a timeout a half-open connection wedges the poll loop forever.
 REQUEST_TIMEOUT = 30
 
-# Environment variables that must be present and non-empty for the tool to run.
 REQUIRED_ENV_VARS = ('RADARR_URL', 'RADARR_API_KEY')
 
-# Bounds for INTERVAL_MINUTES. A zero/negative interval turns the poll loop into
-# an unbounded busy loop (time.sleep(0) returns instantly), and an absurd value
-# silently stops the container from ever updating again. Reject both at startup.
+# 0 busy-loops (time.sleep(0)); a huge value stops updates forever. Both are
+# rejected at startup rather than clamped.
 MIN_INTERVAL_MINUTES = 1
 MAX_INTERVAL_MINUTES = 525_600  # one year
 
-# Log levels accepted in LOG_LEVEL, as a case-insensitive lookup.
 VALID_LOG_LEVELS = ('DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL')
 
 def _raise_on_auth_failure(response):
     """Raise ``AuthenticationError`` when Radarr rejects the API key.
 
-    Must run *before* ``response.raise_for_status()``: 401 and 403 are otherwise
-    flattened into a generic ``HTTPError`` and retried forever by the poll loop.
-    This was a real, silent failure mode - three stale processes with an empty
-    API key sat in the retry loop for a day, emitting a 401 every five minutes
-    while never tagging anything, and the container reported nothing wrong.
+    Must run before ``response.raise_for_status()``, or 401/403 becomes a
+    generic ``HTTPError`` and the poll loop retries it forever.
     """
     if getattr(response, 'status_code', None) in (401, 403):
         raise AuthenticationError(
@@ -78,8 +68,7 @@ class RadarrAPI:
     def get_movie(self, movie_id: int) -> Dict:
         """Fetch a single movie from Radarr.
 
-        Used to re-read immediately before a write so the PUT is not built from
-        a resource fetched at the start of the pass (see process_movie_tags).
+        Used to re-read immediately before a write (see process_movie_tags).
         """
         endpoint = f"{self.base_url}/api/v3/movie/{movie_id}"
         try:
@@ -149,15 +138,8 @@ class RadarrAPI:
 class AuthenticationError(RequestException):
     """Raised when Radarr rejects the API key (HTTP 401 or 403).
 
-    A wrong key is not a transient fault, so it must not be retried: the poll
-    loop would otherwise log one line every five minutes forever while never
-    tagging anything. Treated as fatal so the container exits and its restart
-    policy surfaces the misconfiguration. See ``main()``.
-
-    Subclasses ``RequestException`` because an HTTP failure *is* a request
-    failure: every caller already catches that, so the thousands of request
-    paths keep treating 401 as a failure while ``main()`` can still single this
-    case out to stop retrying.
+    Fatal, not transient - ``main()`` stops retrying. Subclasses
+    ``RequestException`` so existing callers keep treating it as a failure.
     """
 
 def parse_args():
@@ -176,10 +158,8 @@ def parse_args():
 
 def get_config_from_env():
     """Load configuration from environment variables"""
-    # Fail fast with a message that names the culprits: indexing os.environ
-    # directly raised an unhelpful KeyError traceback for a missing variable, and
-    # a whitespace-only value passed the old check and only failed later as a
-    # 401 "Authentication failed", which sends the user looking at a fine key.
+    # Name the missing variables: indexing os.environ gave an opaque KeyError,
+    # and a whitespace-only value only surfaced later as a 401.
     missing = [name for name in REQUIRED_ENV_VARS
                if not os.getenv(name, '').strip()]
     if missing:
@@ -187,7 +167,7 @@ def get_config_from_env():
             "Missing required environment variables: " + ", ".join(missing))
 
     config = {
-        'radarr_url': os.environ['RADARR_URL'],      # safe: guard proved it exists
+        'radarr_url': os.environ['RADARR_URL'],
         'radarr_api_key': os.environ['RADARR_API_KEY'],
         'log_level': get_log_level(os.getenv('LOG_LEVEL', 'INFO')),
         'score_threshold': int(os.getenv('SCORE_THRESHOLD', '100')),
@@ -199,11 +179,10 @@ def get_config_from_env():
     return config
 
 def get_log_level(raw: str) -> str:
-    """Normalise ``LOG_LEVEL`` so an unknown value cannot silently disable logs.
+    """Normalise ``LOG_LEVEL``, rejecting unknown values.
 
-    ``logging`` accepts any unknown level name and installs a handler that drops
-    every record at that level, so a typo like ``LOG_LEVEL=VERBOSE`` produces a
-    container that looks healthy while logging nothing at all.
+    ``logging`` accepts any name and then drops every record, so a typo like
+    ``VERBOSE`` looks healthy while logging nothing.
     """
     level = (raw or '').strip().upper()
     if level not in VALID_LOG_LEVELS:
@@ -215,8 +194,7 @@ def get_log_level(raw: str) -> str:
 def get_interval_minutes(raw: str) -> int:
     """Validate ``INTERVAL_MINUTES`` so the poll loop always gets a sane delay.
 
-    Zero or negative values make ``time.sleep`` return immediately, spinning the
-    loop in a tight CPU-burning cycle, so they are rejected rather than clamped.
+    Non-positive values make ``time.sleep`` return instantly, spinning the loop.
     """
     try:
         interval_minutes = int(raw)
@@ -249,13 +227,9 @@ def _merge_fresh_tags(
         new_tag_ids: List[int]) -> List[int]:
     """Recompute the tags to write from a freshly read movie.
 
-    ``process_movie_tags`` decides its tag list from a snapshot that can be
-    minutes old, and Radarr has no partial-update endpoint for movies
-    (/api/v3/movie/editor returns 404), so the PUT carries the whole resource.
-    Re-reading the movie is therefore not sufficient on its own: if the user
-    added a tag while the pass was running, writing the stale list would drop it.
-    This keeps every unmanaged tag the movie has *now* and re-applies this tool's
-    own tags on top, so the fresh state wins.
+    Radarr has no partial-update endpoint, so the PUT carries the whole
+    resource; re-reading alone still drops a tag the user added during the pass.
+    This keeps every unmanaged tag the movie has now and re-applies our own.
     """
     fresh_current_tags = set(fresh_movie.get('tags', []))
     if fresh_current_tags == current_tags:
@@ -282,15 +256,9 @@ def process_movie_tags(
     """Process and update tags for a single movie"""
     current_tags = set(movie.get('tags', []))
 
-    # Remove any existing managed tags (by ID). The label->id mapping is already
-    # available in ``tag_map``, so no additional get_tags() request is needed.
-    #
-    # The strip set must be derived from MANAGED_TAGS, never from every value in
-    # ``tag_map``: ensure_required_tags() maps *all* tags that exist in Radarr
-    # (not just the managed ones), so ``set(tag_map.values())`` treated unrelated
-    # tags - 'requested', 'potential-delete', auto-tagging tags - as managed and
-    # erased them from every movie on every pass. Only the tags this tool owns may
-    # be stripped.
+    # Strip managed tags by ID, reusing the label->id map from ensure_required_tags().
+    # Derive the strip set from MANAGED_TAGS only: that map holds *every* Radarr
+    # tag, so set(tag_map.values()) would erase unrelated tags from every movie.
     managed_tag_ids = {tag_map[label] for label in MANAGED_TAGS
                        if label in tag_map}
     new_tag_ids = [tag_id for tag_id in current_tags
@@ -300,17 +268,9 @@ def process_movie_tags(
         logging.debug("Keeping unmanaged tags %s for %s",
                       preserved_tag_ids, movie['title'])
 
-    # Get movie file and score
-    #
-    # Deliberate N+1 - do not "optimise" this away. The movieFile object embedded
-    # in the GET /api/v3/movie response does NOT carry the score: customFormatScore
-    # is null there for all 467 movies (Radarr 6.0.4.10291), so reading it from the
-    # list payload would silently tag every movie 'no-score'. There is no bulk
-    # alternative either - both verified against the live API:
-    #   GET /api/v3/moviefile            -> 400 (an id is required)
-    #   GET /api/v3/moviefile?movieIds=.. -> 400 (repeated or comma form)
-    #   GET /api/v3/moviefile/bulk       -> 404 (does not exist)
-    # One request per movie file is the only way to obtain the real score.
+    # Deliberate N+1 - the movieFile embedded in GET /api/v3/movie has a null
+    # customFormatScore, and there is no bulk moviefile endpoint, so one request
+    # per movie file is the only way to read the real score.
     score = None
     movie_file = None
     if movie.get('movieFileId'):
@@ -328,19 +288,14 @@ def process_movie_tags(
         new_tag_name)
     new_tag_ids.append(tag_map[new_tag_name])
 
-    # Add special tags if needed (reusing the movie file already fetched above)
+    # Reuse the movie file already fetched above.
     new_tag_ids = add_special_tags(
         movie, movie_file, tag_map, new_tag_ids, config)
 
-    # Only update if tags changed
     if set(new_tag_ids) != current_tags:
-        # Re-read the movie immediately before writing. ``movie`` was captured at
-        # the start of a pass that makes one request per movie file, so a user
-        # editing tags in the Radarr UI minutes later would otherwise have that
-        # edit reverted by this PUT, which sends the whole stale resource back.
-        # Re-fetching narrows the window from the length of the pass to a single
-        # round-trip. A failed refresh skips the write rather than gambling on
-        # stale data.
+        # Re-read right before writing: the PUT sends the whole resource, so a
+        # tag edit made in the Radarr UI during this pass would be reverted.
+        # A failed refresh skips the write rather than using stale data.
         try:
             fresh_movie = api.get_movie(movie['id'])
         except RequestException:
@@ -348,9 +303,8 @@ def process_movie_tags(
                 "Skipping tag update for %s: could not re-read movie", movie['title'])
             return False
 
-        # Re-read alone is not enough: the tag list is also recomputed from the
-        # fresh snapshot, or a tag the user added during the pass is still lost
-        # (see _merge_fresh_tags).
+        # Re-read alone is not enough; also recompute the tag list from the fresh
+        # snapshot (see _merge_fresh_tags).
         new_tag_ids = _merge_fresh_tags(
             fresh_movie, current_tags, managed_tag_ids, new_tag_ids)
 
@@ -366,8 +320,7 @@ def add_special_tags(
         config: Dict) -> List[int]:
     """Add special tags (motong, 4k) if conditions are met.
 
-    ``movie_file`` is the already-fetched movie file payload (or None when the
-    movie has no file / the lookup failed), avoiding a duplicate API request.
+    ``movie_file`` is the already-fetched movie file payload, or None.
     """
     if not movie.get('movieFileId') or movie_file is None:
         return tag_ids
@@ -388,10 +341,8 @@ def add_special_tags(
 def ensure_required_tags(api: RadarrAPI) -> Dict:
     """Ensure required tags exist and return a label -> ID mapping.
 
-    NOTE: the returned map covers *every* tag known to Radarr, including tags
-    this tool does not manage. Callers deciding which tags may be stripped must
-    filter on MANAGED_TAGS - iterating over the whole map would treat unrelated
-    tags as managed.
+    NOTE: the map covers *every* tag known to Radarr. Callers deciding which tags
+    may be stripped must filter on MANAGED_TAGS.
     """
     all_tags = api.get_tags()
     tag_map = {tag['label']: tag['id'] for tag in all_tags}
@@ -407,8 +358,7 @@ def ensure_required_tags(api: RadarrAPI) -> Dict:
 def run_once(api: RadarrAPI, config: Dict, test_mode: bool = False) -> int:
     """Execute a single tagging pass and return the number of updated movies.
 
-    Kept separate from ``main`` so the processing logic can be exercised
-    without entering the infinite polling loop.
+    Separate from ``main`` so it can run without the polling loop.
     """
     tag_map = ensure_required_tags(api)
     movies = api.get_movies()
@@ -437,9 +387,8 @@ def main():
         print(f"Radarr Tag Updater v{VERSION}")
         sys.exit(0)
 
-    # Load the config before the loop starts. A misconfigured deployment cannot
-    # recover by retrying, so fail fast with a single log line (no traceback)
-    # rather than crash-looping under a container restart policy.
+    # Fail fast: a bad config cannot recover by retrying, so log one line (no
+    # traceback) instead of crash-looping under the restart policy.
     try:
         config = get_config_from_env()
         interval_minutes = get_interval_minutes(
@@ -448,8 +397,7 @@ def main():
         logging.error("Configuration error: %s", e)
         sys.exit(1)
 
-    # Inside the guard on purpose: setup_logging() can itself raise ValueError for
-    # an invalid level, and that must not escape as a traceback either.
+    # Inside the guard: setup_logging() also raises ValueError on a bad level.
     setup_logging(config['log_level'])
     logging.info("Starting Radarr Tag Updater v%s", VERSION)
 
@@ -462,8 +410,7 @@ def main():
             time.sleep(interval_minutes * 60)
 
         except AuthenticationError as e:
-            # Fatal: a rejected key never becomes valid by waiting, and retrying
-            # hides the problem behind one log line per 5 minutes forever.
+            # Fatal: waiting never fixes a rejected key.
             logging.error("Authentication failed: %s", str(e))
             sys.exit(1)
 
@@ -476,15 +423,12 @@ def setup_logging(log_level):
     """Configure logging"""
     log_format = '%(asctime)s - %(levelname)s - %(message)s'
 
-    # Clear any existing handlers
     logging.root.handlers = []
 
-    # Set up console handler
     console_handler = logging.StreamHandler()
     console_handler.setLevel(log_level)
     console_handler.setFormatter(logging.Formatter(log_format))
 
-    # Configure root logger
     logging.basicConfig(
         level=log_level,
         format=log_format,

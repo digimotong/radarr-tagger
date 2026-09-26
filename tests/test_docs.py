@@ -1,16 +1,11 @@
 """Documentation drift guards.
 
-Documentation is the only interface most users of this container ever read, so
-the README is asserted against the code rather than trusted:
+The README is asserted against the code rather than trusted: the logged version
+must match ``main.VERSION``, every environment variable the code reads must be
+documented, and operational behaviour (fail-fast, interval bounds, exact-match
+tagging) must be described as implemented.
 
-* the logged version string must match ``main.VERSION`` (it once said v1.0.0
-  while the code shipped 1.0.4);
-* every environment variable the code reads must be documented;
-* operational behaviour users depend on (fail-fast, interval bounds, exact-match
-  tagging) must be described as implemented.
-
-The tests deliberately check the *presence* of facts rather than the exact
-wording of prose, so documentation can be rewritten freely.
+Facts are checked, not wording, so the prose stays free to be rewritten.
 """
 
 import os
@@ -48,8 +43,7 @@ class TestVersionDocumentation:
 class TestEnvironmentDocumentation:
     """Every environment variable the code reads is documented."""
 
-    # Kept explicit rather than scraped from the source: an accidental rename of
-    # an environment variable should fail here instead of silently matching.
+    # Explicit rather than scraped from the source, so a rename fails here.
     DOCUMENTED_VARS = (
         'RADARR_URL',
         'RADARR_API_KEY',
@@ -115,8 +109,7 @@ class TestOperationalDocumentation:
         ``| `INTERVAL_MINUTES` | `20` | ... |``: a looser pattern also matches the
         prose explaining that 0 is rejected, which is not a default.
         """
-        # The default lives as a literal in main() (os.getenv('INTERVAL_MINUTES',
-        # '20')) rather than as a named constant, so it is pinned here as well;
+        # The default is a literal in main(), so it is pinned here too;
         # test_config.py asserts the same value against the real code path.
         defaults = re.findall(
             r'\|\s*`INTERVAL_MINUTES`\s*\|\s*`(\d+)`\s*\|', readme)
@@ -162,11 +155,7 @@ def _read_source():
 class TestDependencyPinning:
     """Runtime dependencies must be pinned, for the same reason the base image is.
 
-    An unpinned requirement makes the build non-reproducible: two images built
-    from the same commit can contain different library versions, so a bug that
-    appears after a rebuild is far harder to attribute. The Dockerfile already
-    argues this case for the base image - this keeps the Python dependency
-    consistent with that reasoning.
+    An unpinned requirement makes the build non-reproducible.
     """
 
     def _requirement_lines(self, filename):
