@@ -173,8 +173,8 @@ class TestUpdateMovie:
 class TestTimeouts:
     """Every HTTP call must carry an explicit timeout.
 
-    Without one, ``requests`` blocks forever, which would hang the long-running
-    update loop on a half-open connection.
+    Without one, ``requests`` blocks forever and hangs the update loop on a
+    half-open connection.
     """
 
     def _assert_timeout(self, session):

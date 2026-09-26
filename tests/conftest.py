@@ -1,9 +1,8 @@
 """Shared pytest fixtures for the radarr-tagger test suite.
 
-The suite is deliberately dependency-free beyond pytest: ``FakeSession`` mimics
-the small slice of the ``requests.Session`` surface that ``RadarrAPI`` uses, and
-``FakeRadarrAPI`` records call counts so tests can assert that the client does
-not make redundant network requests.
+``FakeSession`` mimics the small slice of ``requests.Session`` that ``RadarrAPI``
+uses, and ``FakeRadarrAPI`` records call counts so tests can assert that the
+client makes no redundant requests.
 """
 
 import faulthandler
@@ -13,13 +12,12 @@ import pytest
 from requests.exceptions import HTTPError, RequestException
 from requests.structures import CaseInsensitiveDict
 
-# The application module lives in a hyphenated directory, so rely on the root
-# conftest.py having already placed it on sys.path.
+# The app module lives in a hyphenated directory; the root conftest.py puts it
+# on sys.path.
 import main  # noqa: E402  pylint: disable=wrong-import-position
 
-# Any test that reaches a real sleep is a bug (see the ``forbid_real_sleep``
-# fixture), so a hang means the guard is missing - not that we should wait. Dump
-# every thread's traceback after a few seconds and let the runner kill the file.
+# Any test that reaches a real sleep is a bug (see forbid_real_sleep), so a hang
+# means that guard is missing. Dump tracebacks and let the runner kill the file.
 _HANG_TIMEOUT_SECONDS = float(os.getenv('PYTEST_HANG_TIMEOUT', '10'))
 faulthandler.dump_traceback_later(_HANG_TIMEOUT_SECONDS, exit=True)
 
@@ -57,8 +55,7 @@ class FakeSession:
 
     def __init__(self, responses=None):
         self.responses = responses or {}
-        # Mirrors requests.Session.headers, which is a CaseInsensitiveDict so that
-        # header lookups are case-insensitive in production as well as in tests.
+        # Case-insensitive, mirroring requests.Session.headers.
         self.headers = CaseInsensitiveDict()
         self.calls = []
 
@@ -129,10 +126,8 @@ class FakeRadarrAPI:
     def get_movie(self, movie_id):
         """Return a *copy* of one configured movie.
 
-        The copy matters: production code re-reads the movie immediately before
-        PUT so that it writes fresh server state rather than the stale snapshot
-        captured at the start of the pass. Returning the same object here would
-        let a stale-snapshot bug pass unnoticed.
+        The copy matters: production code re-reads before PUT, and returning the
+        same object here would hide a stale-snapshot bug.
         """
         self.calls['get_movie'] += 1
         self._maybe_fail('get_movie')
@@ -206,11 +201,8 @@ def tag_map():
 def full_tag_map():
     """A label->id map shaped like ``ensure_required_tags()`` really returns.
 
-    ``ensure_required_tags()`` maps *every* tag that exists in Radarr, not only
-    the managed ones, so a realistic map must contain unmanaged entries. Do not
-    "simplify" this back to DEFAULT_TAG_MAP: tests built on a managed-only map
-    cannot detect unmanaged tags being stripped (that gap is exactly how the
-    tag-wiping bug shipped).
+    That function maps *every* Radarr tag, not just the managed ones, so a
+    managed-only map cannot detect unmanaged tags being stripped.
     """
     return {**DEFAULT_TAG_MAP, 'requested': 98, 'potential-delete': 99}
 
@@ -243,16 +235,10 @@ def env_guard(monkeypatch):
 def forbid_real_sleep(monkeypatch):
     """Fail fast if production code tries to sleep for real.
 
-    ``main.main()`` polls forever in a ``while True`` loop, so a config-validation
-    regression (for example a non-positive ``INTERVAL_MINUTES`` slipping past the
-    bounds check) turns into an unbounded ``time.sleep(0)`` busy loop: the test
-    never returns, the mutation harness never advances, and CI burns its whole
-    job timeout with no useful diagnostic.
-
-    Replacing ``main.time.sleep`` makes that failure mode explicit and immediate.
-    Tests that exercise the loop patch ``main.time.sleep`` themselves; monkeypatch
-    is applied inside the test body, so their recorder still takes precedence over
-    this guard.
+    A validation regression turns ``main()`` into an unbounded ``time.sleep(0)``
+    busy loop, which hangs the test and burns the CI job timeout; replacing
+    ``main.time.sleep`` makes that immediate. Tests exercising the loop patch it
+    themselves, and their recorder takes precedence over this guard.
     """
     def _unexpected_sleep(seconds, *args, **kwargs):
         raise AssertionError(
